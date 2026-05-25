@@ -74,7 +74,7 @@ class OFDM_Simulator:
             text="CARGAR IMAGEN",
             command=self.load_image,
             bg="#34495e",
-            fg="white",
+            fg="black",
             font=("Helvetica", 10, "bold"),
         ).pack(pady=10, fill="x")
 
@@ -123,7 +123,7 @@ class OFDM_Simulator:
             text="Añadir",
             command=self.add_snr,
             bg="#2980b9",
-            fg="white",
+            fg="black",
             font=("Helvetica", 8, "bold"),
         ).pack(side="left")
 
@@ -139,16 +139,16 @@ class OFDM_Simulator:
             text="Eliminar",
             command=self.remove_snr,
             bg="#c0392b",
-            fg="white",
-            font=("Helvetica", 7),
+            fg="black",
+            font=("Helvetica", 8, "bold"),
         ).pack(side="left", padx=(0, 3))
         tk.Button(
             snr_btn_frame,
             text="Limpiar",
             command=self.clear_snr,
             bg="#7f8c8d",
-            fg="white",
-            font=("Helvetica", 7),
+            fg="black",
+            font=("Helvetica", 8, "bold"),
         ).pack(side="left")
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=6)
@@ -169,14 +169,14 @@ class OFDM_Simulator:
             text="EJECUTAR TRANSMISIÓN",
             command=self.run_simulation,
             bg="#27ae60",
-            fg="white",
+            fg="black",
             font=("Helvetica", 12, "bold"),
             height=2,
         ).pack(pady=10, fill="x")
 
         ttk.Label(ctrl_frame, text="Datos del Sistema:", font=("Helvetica", 9, "bold")).pack()
         self.txt_report = tk.Text(
-            ctrl_frame, width=32, height=14, font=("Consolas", 8), bg="#fdfefe"
+            ctrl_frame, width=32, height=14, font=("Consolas", 8), bg="#121313"
         )
         self.txt_report.pack(pady=4, padx=4)
 
@@ -413,7 +413,7 @@ class OFDM_Simulator:
             self.tab1,
             text=f"  Bits de imagen: {n_bits}   |   Símbolos {mod_name}: {n_syms}  ",
             font=("Consolas", 11, "bold"),
-            bg="#eaf4fb",
+            bg="#0b314d",
             relief="groove",
             padx=10,
             pady=5,
@@ -540,3 +540,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = OFDM_Simulator(root)
     root.mainloop()
+
