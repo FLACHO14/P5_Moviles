@@ -46,7 +46,7 @@ class OFDM_Simulator:
 
         self.img_path = tk.StringVar()
         self.mod_var = tk.StringVar(value="16QAM")
-        self.chan_var = tk.StringVar(value="Rayleigh")
+        self.chan_var = tk.StringVar(value="Rayleigh (NLoS)")
         self.vel_var = tk.StringVar(value="Pedestre (3 km/h)")
         self.cp_var = tk.StringVar(value="Normal")
         self.bw_var = tk.DoubleVar(value=10.0)
@@ -306,9 +306,9 @@ class OFDM_Simulator:
             tx_signal, papr_list = ofdm_tx.ofdm_tx_block(symbols_tx, Nfft, cp_len)
 
             # --- Canal ---
-            if chan_type == "Rayleigh":
+            if chan_type == "Rayleigh (NLoS)":
                 h = ofdm_channel.multipath_rayleigh_channel(taps_L)
-            elif chan_type == "Rician":
+            elif chan_type == "Rician (LoS)":
                 h = ofdm_channel.multipath_rician_channel(taps_L)
             else:
                 h = None  # Canal Ideal: solo AWGN
