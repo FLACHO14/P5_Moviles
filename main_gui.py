@@ -90,7 +90,7 @@ class OFDM_Simulator:
         ttk.Combobox(
             ctrl_frame,
             textvariable=self.chan_var,
-            values=["Ideal", "Rayleigh NLoS", "Rician LoS"],
+            values=["Ideal", "Rayleigh (NLoS)", "Rician (LoS)"],
         ).pack(pady=3, fill="x", padx=5)
 
         ttk.Label(ctrl_frame, text="Ambiente / Velocidad:").pack()
@@ -539,3 +539,4 @@ class OFDM_Simulator:
 if __name__ == "__main__":
     root = tk.Tk()
     app = OFDM_Simulator(root)
+    root.mainloop()
