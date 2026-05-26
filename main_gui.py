@@ -53,6 +53,9 @@ class OFDM_Simulator:
         self.snr_entry_var = tk.StringVar(value="20")
         self.mc_var = tk.StringVar(value="5")
         self.taps_var = tk.StringVar(value="8")
+        # Lado máximo de la imagen: la imagen se escala proporcionalmente para que
+        # ningún lado supere este valor (sin distorsionar el aspecto original).
+        self.max_side_var = tk.StringVar(value="128")
 
         # Lista de valores SNR precargada; el máximo se usa para la simulación de imagen
         self.snr_list = [0, 5, 10, 15, 20]
@@ -77,6 +80,14 @@ class OFDM_Simulator:
             fg="black",
             font=("Helvetica", 10, "bold"),
         ).pack(pady=10, fill="x")
+
+        ttk.Label(ctrl_frame, text="Lado máx. imagen (px):").pack()
+        tk.Spinbox(
+            ctrl_frame,
+            textvariable=self.max_side_var,
+            from_=8, to=1024, increment=8,
+            width=8, font=("Consolas", 9),
+        ).pack(pady=3)
 
         ttk.Label(ctrl_frame, text="Ancho de Banda (MHz):").pack()
         ttk.Entry(ctrl_frame, textvariable=self.bw_var).pack(pady=3, fill="x", padx=5)
@@ -285,9 +296,16 @@ class OFDM_Simulator:
             snr_sim = max(self.snr_list)
 
             # --- Carga y serialización de imagen ---
-            img = Image.open(self.img_path.get()).convert("L").resize((128, 128))
+            # Redimensionamiento proporcional: el lado mayor queda en max_side px;
+            # el otro lado se escala al mismo factor para no distorsionar la imagen.
+            max_side = max(8, int(self.max_side_var.get()))
+            img = Image.open(self.img_path.get()).convert("L")
+            w, h = img.size
+            scale = min(1.0, max_side / max(w, h))
+            if scale < 1.0:
+                img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
             img_arr = np.array(img)
-            bits_tx = np.unpackbits(img_arr)  # 128×128×8 = 131 072 bits
+            bits_tx = np.unpackbits(img_arr.flatten())
 
             stats = ofdm_utils.calculate_resource_stats(bits_tx, Nfft, M)
 
@@ -346,6 +364,7 @@ class OFDM_Simulator:
                 f"SNR valores: {self.snr_list}\n"
                 f"MC iter.: {n_mc}\n\n"
                 f"--- IMAGEN ---\n"
+                f"Tamaño: {img_arr.shape[1]}×{img_arr.shape[0]} px\n"
                 f"Bits TX: {len(bits_tx)}\n"
                 f"Símbolos {mod_name}: {len(symbols_tx)}\n"
                 f"OFDM símbolos: {stats['total_ofdm_symbols']}\n"
