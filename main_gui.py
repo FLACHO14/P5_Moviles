@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from PIL import Image
 import ofdm_tx, ofdm_channel, ofdm_rx, ofdm_utils, ofdm_params
 
@@ -246,33 +246,52 @@ class OFDM_Simulator:
     def _render_tab1(self, d):
         self._clear_tab(self.tab1)
         mods = list(d["results"].keys())
-        fig = plt.figure(figsize=(15, 12))
+        
+        fig = plt.figure(figsize=(18, 14), constrained_layout=False)
+        fig.subplots_adjust(top=0.88, bottom=0.05, left=0.05, right=0.95, hspace=0.3, wspace=0.2)
+        
         fig.suptitle(
             f"SNR transmisión: {d['snr_sim']} dB | Perfil: {d['profile']} | Velocidad: {d['velocity']} km/h\n"
             f"Bits de imagen: {d['total_bits']} | Símbolos OFDM totales: {d['total_ofdm_blocks']}",
-            fontsize=12, fontweight='bold'
+            fontsize=12, fontweight='bold', y=0.98
         )
-        # Imagen TX (fila superior, columnas 1-3)
+        
         ax_tx = plt.subplot(3, 3, (1, 3))
         ax_tx.imshow(d["img_tx"], cmap="gray")
-        ax_tx.set_title("Imagen original (TX)")
+        ax_tx.set_title("Imagen original (TX)", fontsize=10)
         ax_tx.axis("off")
-        # Para cada modulación: imagen RX y constelación RX
+        
         for col, mod in enumerate(mods):
-            ax_rx = plt.subplot(3, 3, 3 + col + 1)   # segunda fila
+            ax_rx = plt.subplot(3, 3, 3 + col + 1)
             ax_rx.imshow(d["results"][mod]["img_rx"], cmap="gray")
-            ax_rx.set_title(f"{mod} - RX\nPSNR: {d['results'][mod]['psnr']:.2f} dB")
+            ax_rx.set_title(f"{mod} - RX\nPSNR: {d['results'][mod]['psnr']:.2f} dB", fontsize=9)
             ax_rx.axis("off")
-            ax_c = plt.subplot(3, 3, 6 + col + 1)    # tercera fila
+            
+            ax_c = plt.subplot(3, 3, 6 + col + 1)
             const_rx = d["results"][mod]["const_rx"]
             ax_c.scatter(np.real(const_rx), np.imag(const_rx), s=5, alpha=0.5, c='r', label='RX')
-            ax_c.set_title(f"Constelación recibida ({mod})")
-            ax_c.set_xlabel("I"); ax_c.set_ylabel("Q")
+            ax_c.set_title(f"Constelación recibida ({mod})", fontsize=10)
+            ax_c.set_xlabel("I", fontsize=8)
+            ax_c.set_ylabel("Q", fontsize=8)
             ax_c.grid(True)
             ax_c.set_aspect('equal')
-            ax_c.legend()
-        plt.tight_layout()
-        self._embed(fig, self.tab1)
+            ax_c.legend(fontsize=8)
+        
+        canvas = FigureCanvasTkAgg(fig, master=self.tab1)
+        canvas.draw()
+        
+        scroll_y = tk.Scrollbar(self.tab1, orient=tk.VERTICAL, command=canvas.get_tk_widget().yview)
+        scroll_x = tk.Scrollbar(self.tab1, orient=tk.HORIZONTAL, command=canvas.get_tk_widget().xview)
+        canvas.get_tk_widget().configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        
+        canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        toolbar = NavigationToolbar2Tk(canvas, self.tab1)
+        toolbar.update()
+        
+        plt.close(fig)
     
     def _render_tab2(self, d):
         self._clear_tab(self.tab2)
