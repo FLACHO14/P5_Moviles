@@ -168,6 +168,7 @@ class OFDM_Simulator:
                 bits_in = np.pad(bits_tx, (0, pad_bits), constant_values=0) if pad_bits else bits_tx.copy()
                 
                 symbols_qam = ofdm_tx.qam_mod(bits_in, M)
+                const_tx_sample = symbols_qam[:2000]   # muestra para constelación TX
                 tx_signal, _ = ofdm_tx.ofdm_tx_block(symbols_qam, Nfft, cp_len)
                 rx_signal, _ = ofdm_channel.apply_channel(tx_signal, h_impulse, snr_sim, velocity, fs=fs)
                 Y = ofdm_rx.ofdm_rx_block(rx_signal, Nfft, cp_len)
@@ -200,7 +201,8 @@ class OFDM_Simulator:
                     "img_rx": img_rx,
                     "psnr": psnr,
                     "n_ofdm_blocks": n_blocks,
-                    "const_rx": Xhat[:2000]
+                    "const_rx": Xhat[:2000],
+                    "const_tx": const_tx_sample
                 }
             
             ber_data, ccdf_data = ofdm_utils.run_analysis(bits_tx, Nfft, cp_len, profile, taps_L, self.snr_list, n_mc)
@@ -262,15 +264,19 @@ class OFDM_Simulator:
         ax_tx.axis("off")
         
         for col, mod in enumerate(mods):
+            # Imagen recibida
             ax_rx = plt.subplot(3, 3, 3 + col + 1)
             ax_rx.imshow(d["results"][mod]["img_rx"], cmap="gray")
             ax_rx.set_title(f"{mod} - RX\nPSNR: {d['results'][mod]['psnr']:.2f} dB", fontsize=9)
             ax_rx.axis("off")
             
+            # Constelación TX + RX
             ax_c = plt.subplot(3, 3, 6 + col + 1)
+            const_tx = d["results"][mod]["const_tx"]
             const_rx = d["results"][mod]["const_rx"]
+            ax_c.scatter(np.real(const_tx), np.imag(const_tx), s=5, alpha=0.5, c='g', label='TX')
             ax_c.scatter(np.real(const_rx), np.imag(const_rx), s=5, alpha=0.5, c='r', label='RX')
-            ax_c.set_title(f"Constelación recibida ({mod})", fontsize=10)
+            ax_c.set_title(f"Constelaciones TX/RX ({mod})", fontsize=10)
             ax_c.set_xlabel("I", fontsize=8)
             ax_c.set_ylabel("Q", fontsize=8)
             ax_c.grid(True)
