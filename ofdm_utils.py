@@ -96,9 +96,9 @@ def run_analysis(bits_tx, Nfft, cp_len, chan_type, taps_L, snr_list, n_mc):
                 tx, _ = ofdm_tx.ofdm_tx_block(s, Nfft, cp_len)
 
                 # Nueva realización del canal para cada iteración Monte Carlo
-                if chan_type == "Rayleigh":
+                if chan_type == "Rayleigh (NLoS)":
                     h = ofdm_channel.multipath_rayleigh_channel(taps_L)
-                elif chan_type == "Rician":
+                elif chan_type == "Rician (LoS)":
                     h = ofdm_channel.multipath_rician_channel(taps_L)
                 else:
                     h = None  # Ideal: solo AWGN
