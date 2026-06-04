@@ -1,138 +1,92 @@
 import numpy as np
-import matplotlib.pyplot as plt
-from ofdm_params import DELTA_F, FC
+from PIL import Image
 
-def next_pow2(n):
-    return 1 if n <= 1 else 2 ** int(np.ceil(np.log2(n)))
+def gray_encode(n):
+    return n ^ (n >> 1)
 
-def get_nfft_cp(bw_mhz, cp_mode):
-    bw_hz = bw_mhz * 1e6
-    N_used = int(round(bw_hz / DELTA_F))
-    if N_used < 8:
-        N_used = 8
-    Nfft = next_pow2(N_used)
-    cp_len = Nfft // 8 if cp_mode == "Normal" else Nfft // 4
-    return Nfft, cp_len, N_used
+def gray_decode(g):
+    b = 0
+    while g:
+        b ^= g
+        g >>= 1
+    return b
 
-def calculate_resource_stats(img_bits, Nfft, M):
-    k = int(np.log2(M))
-    bits_per_ofdm = Nfft * k
-    total_ofdm = int(np.ceil(len(img_bits) / bits_per_ofdm))
-    padding = total_ofdm * bits_per_ofdm - len(img_bits)
-    return {
-        "bits_per_ofdm": bits_per_ofdm,
-        "total_ofdm_symbols": total_ofdm,
-        "padding_zeros": padding,
-    }
+def image_to_bitstream(image_path, max_side=256):
+    img = Image.open(image_path).convert('L')
+    w, h = img.size
+    if max(w, h) > max_side:
+        scale = max_side / max(w, h)
+        new_size = (int(w * scale), int(h * scale))
+        img = img.resize(new_size, Image.Resampling.LANCZOS)
+    img_arr = np.array(img)
+    bits = np.unpackbits(img_arr.flatten())
+    return bits, img_arr.shape, img_arr  # ahora devuelve también el array de la imagen
 
-def run_analysis(bits_tx, Nfft, cp_len, chan_profile, taps_L, snr_list, n_mc):
-    import ofdm_tx, ofdm_channel, ofdm_rx
-    mods = {"QPSK":4, "16QAM":16, "64QAM":64}
-    ber_data = {}
-    ccdf_data = {}
-    for mod_name, M in mods.items():
-        k = int(np.log2(M))
-        bits_per_ofdm = Nfft * k
-        pad = (-len(bits_tx)) % bits_per_ofdm
-        bits_in = np.pad(bits_tx, (0, pad), constant_values=0) if pad else bits_tx.copy()
-        # CCDF PAPR
-        n_syms_papr = 1000
-        bits_rand = np.random.randint(0,2, n_syms_papr * Nfft * k).astype(np.uint8)
-        s_rand = ofdm_tx.qam_mod(bits_rand, M)
-        _, papr_vals = ofdm_tx.ofdm_tx_block(s_rand, Nfft, cp_len)
-        papr_sorted = np.sort(papr_vals)
-        ccdf = 1.0 - np.arange(1, len(papr_sorted)+1)/len(papr_sorted)
-        ccdf_data[mod_name] = (papr_sorted, ccdf)
-        # BER
-        ber_curve = []
-        fs = Nfft * DELTA_F
-        for snr_db in snr_list:
-            acc = 0.0
-            for _ in range(n_mc):
-                s = ofdm_tx.qam_mod(bits_in, M)
-                tx, _ = ofdm_tx.ofdm_tx_block(s, Nfft, cp_len)
-                h_impulse = ofdm_channel.get_channel_profile(chan_profile, taps_L)
-                rx, _ = ofdm_channel.apply_channel(tx, h_impulse, snr_db, velocity_kmh=0, fs=fs)
-                Y = ofdm_rx.ofdm_rx_block(rx, Nfft, cp_len)
-                H_freq = np.fft.fft(h_impulse, n=Nfft)
-                n_frames = len(Y)//Nfft
-                Xhat = ofdm_rx.equalize(Y, np.tile(H_freq, n_frames))
-                bits_hat = ofdm_rx.qam_demod(Xhat, M)[:len(bits_in)]
-                acc += np.mean(bits_hat != bits_in)
-            ber_curve.append(acc/n_mc)
-        ber_data[mod_name] = ber_curve
-    return ber_data, ccdf_data
+def bitstream_to_image(bits, shape):
+    if len(bits) % 8 != 0:
+        bits = np.pad(bits, (0, 8 - len(bits) % 8), constant_values=0)
+    img_bytes = np.packbits(bits)
+    if img_bytes.size > shape[0] * shape[1]:
+        img_bytes = img_bytes[:shape[0]*shape[1]]
+    elif img_bytes.size < shape[0] * shape[1]:
+        img_bytes = np.pad(img_bytes, (0, shape[0]*shape[1] - img_bytes.size), constant_values=0)
+    img_arr = img_bytes.reshape(shape)
+    return Image.fromarray(img_arr, mode='L')
 
-def compute_papr_vs_snr(Nfft, cp_len, M, snr_list, n_mc=10, n_symbols=100):
-    import ofdm_tx
-    papr_means = []
-    papr_stds = []
-    for _ in snr_list:
-        papr_vals = []
-        for _ in range(n_mc):
-            bits = np.random.randint(0,2, n_symbols * Nfft * int(np.log2(M))).astype(np.uint8)
-            sym = ofdm_tx.qam_mod(bits, M)
-            _, papr_list = ofdm_tx.ofdm_tx_block(sym, Nfft, cp_len)
-            papr_vals.append(np.max(papr_list))
-        papr_means.append(np.mean(papr_vals))
-        papr_stds.append(np.std(papr_vals))
-    conf_intervals = [1.96 * s / np.sqrt(n_mc) for s in papr_stds]
-    return papr_means, conf_intervals
+def calculate_ber(bits_tx, bits_rx):
+    min_len = min(len(bits_tx), len(bits_rx))
+    errors = np.sum(bits_tx[:min_len] != bits_rx[:min_len])
+    return errors / min_len if min_len > 0 else 1.0
 
-def plot_subcarrier_analysis(ax, Nfft, fs):
-    import ofdm_tx
-    from scipy import signal
-    symbols = np.ones(Nfft)
-    tx, _ = ofdm_tx.ofdm_tx_block(symbols, Nfft, 0)
-    f_psd, Pxx = signal.welch(tx, fs, nperseg=256)
-    ax[0].semilogy(f_psd/1e3, Pxx)
-    ax[0].set_title("Densidad espectral de potencia (OFDM)")
-    ax[0].set_xlabel("Frecuencia (kHz)")
-    ax[0].set_ylabel("PSD (dB)")
-    ax[0].grid(True)
-    f_sinc = np.linspace(-2*DELTA_F, 2*DELTA_F, 500)
-    H_sinc = np.abs(np.sinc(f_sinc/DELTA_F))
-    ax[1].plot(f_sinc/1e3, H_sinc)
-    ax[1].set_title("Respuesta espectral de una subportadora")
-    ax[1].set_xlabel("Frecuencia (kHz)")
-    ax[1].set_ylabel("|H(f)|")
-    ax[1].grid(True)
-    ax[1].axvline(0, color='r', linestyle='--')
-    ax[1].axvline(DELTA_F/1e3, color='r', linestyle='--')
-    t = np.linspace(0, 2/fs, 200)
-    eye = np.real(tx[:len(t)])
-    ax[2].plot(t*1e6, eye, 'b', alpha=0.5)
-    ax[2].set_title("Diagrama de ojos (señal OFDM)")
-    ax[2].set_xlabel("Tiempo (μs)")
-    ax[2].set_ylabel("Amplitud")
-    ax[2].grid(True)
+def calculate_psnr(img_orig, img_rec):
+    # Asegurar que ambas imágenes tengan las mismas dimensiones
+    if img_orig.shape != img_rec.shape:
+        # Redimensionar la imagen original al tamaño de la reconstruida
+        from PIL import Image as PILImage
+        img_orig_pil = PILImage.fromarray(img_orig.astype('uint8'))
+        img_orig_pil = img_orig_pil.resize((img_rec.shape[1], img_rec.shape[0]), PILImage.Resampling.LANCZOS)
+        img_orig = np.array(img_orig_pil)
+    mse = np.mean((img_orig.astype(float) - img_rec.astype(float))**2)
+    if mse == 0:
+        return 100.0
+    return 20 * np.log10(255.0 / np.sqrt(mse))
 
-def plot_channel_response(ax_time, ax_freq, h, fs, Nfft, channel_name):
-    t_axis = np.arange(len(h)) / fs * 1e6
-    ax_time.stem(t_axis, np.abs(h), basefmt=" ")
-    ax_time.set_title(f"Respuesta al impulso del canal ({channel_name})")
-    ax_time.set_xlabel("Tiempo (μs)")
-    ax_time.set_ylabel("|h(t)|")
-    ax_time.grid(True)
-    H_f = np.fft.fft(h, n=Nfft)
-    f_axis = np.fft.fftfreq(Nfft, 1/fs) / 1e3
-    ax_freq.plot(f_axis, 20*np.log10(np.abs(H_f)+1e-12))
-    ax_freq.set_title("Respuesta en frecuencia del canal")
-    ax_freq.set_xlabel("Frecuencia (kHz)")
-    ax_freq.set_ylabel("|H(f)| (dB)")
-    ax_freq.grid(True)
+def qam_constellation(M):
+    m = int(np.sqrt(M))
+    levels = np.arange(-(m-1), m, 2)
+    Es = (2 * (m**2 - 1)) / 3
+    return levels / np.sqrt(Es)
 
-def plot_cp_analysis(ax, cp_normal, cp_extended, Nfft, fs):
-    labels = ['CP Normal', 'CP Extendido']
-    values = [cp_normal, cp_extended]
-    colors = ['#3498db', '#9b59b6']
-    ax.bar(labels, values, color=colors)
-    ax.set_title("Longitud del Prefijo Cíclico (muestras)")
-    ax.set_ylabel("Muestras")
-    for i, v in enumerate(values):
-        ax.text(i, v+0.5, str(v), ha='center', fontweight='bold')
-    ax2 = ax.twinx()
-    duration_us = np.array(values) / fs * 1e6
-    ax2.bar(labels, duration_us, alpha=0.5, color='orange', label="Duración (μs)")
-    ax2.set_ylabel("Duración (μs)")
-    ax2.legend(loc='upper right')
+def bits_to_symbols(bits, M):
+    k = int(np.log2(float(M)))
+    bits = np.array(bits, dtype=np.uint8)
+    if len(bits) % k != 0:
+        bits = np.pad(bits, (0, k - len(bits) % k), constant_values=0)
+    const = qam_constellation(M)
+    kb = k // 2
+    symbols = []
+    for i in range(0, len(bits), k):
+        chunk = bits[i:i+k]
+        I_val = int(''.join(map(str, chunk[:kb])), 2)
+        Q_val = int(''.join(map(str, chunk[kb:])), 2)
+        I_gray = gray_encode(I_val)
+        Q_gray = gray_encode(Q_val)
+        symbols.append(const[I_gray] + 1j * const[Q_gray])
+    return np.array(symbols)
+
+def symbols_to_bits(symbols, M):
+    k = int(np.log2(float(M)))
+    const = qam_constellation(M)
+    kb = k // 2
+    bits = []
+    for sym in symbols:
+        I = np.real(sym)
+        Q = np.imag(sym)
+        idxI = np.argmin(np.abs(I - const))
+        idxQ = np.argmin(np.abs(Q - const))
+        I_gray = gray_decode(idxI)
+        Q_gray = gray_decode(idxQ)
+        I_bits = [(I_gray >> (kb-1-b)) & 1 for b in range(kb)]
+        Q_bits = [(Q_gray >> (kb-1-b)) & 1 for b in range(kb)]
+        bits.extend(I_bits + Q_bits)
+    return np.array(bits, dtype=np.uint8)

@@ -1,53 +1,67 @@
+# ofdm_tx.py
 import numpy as np
+from ofdm_params import OFDMParams
+from ofdm_utils import bits_to_symbols
 
-def next_pow2(n):
-    return 1 if n <= 1 else 2 ** int(np.ceil(np.log2(n)))
+class OFDMTransmitter:
+    def __init__(self, params: OFDMParams):
+        self.params = params
+        self.fft_size = params.fft_size
+        self.cp_len = params.cp_length()
+        self.data_indices = params.data_indices
+        self.pilot_indices = params.pilot_indices
+        self.num_data = len(self.data_indices)
+        self.num_pilots = len(self.pilot_indices)
 
-def qam_constellation(M):
-    m = int(np.sqrt(M))
-    levels = np.arange(-(m-1), m, 2)
-    Es = (2 * (m**2 - 1)) / 3
-    return levels / np.sqrt(Es)
+    def generate_pilots(self):
+        """Pilotos con valor conocido (BPSK: +1)"""
+        return np.ones(self.num_pilots, dtype=complex)
 
-def qam_mod(bits, M):
-    k = int(np.log2(M))
-    levels = qam_constellation(M)
-    kb = k // 2
-    b = bits.reshape(-1, k)
-    bi = b[:, :kb].dot(1 << np.arange(kb-1, -1, -1))
-    bq = b[:, kb:].dot(1 << np.arange(kb-1, -1, -1))
-    gi = np.array([x ^ (x >> 1) for x in bi], dtype=int)
-    gq = np.array([x ^ (x >> 1) for x in bq], dtype=int)
-    return levels[gi] + 1j * levels[gq]
+    def create_ofdm_symbols(self, data_symbols):
+        total_data = len(data_symbols)
+        num_symbols = int(np.ceil(total_data / self.num_data))
+        # Rellenar con ceros si es necesario
+        if total_data < num_symbols * self.num_data:
+            data_symbols = np.pad(data_symbols, (0, num_symbols * self.num_data - total_data),
+                                  constant_values=0)
+        data_2d = data_symbols.reshape(num_symbols, self.num_data)
+        pilot_vals = self.generate_pilots()
+        tx_signal = []
+        self.subcarrier_grid = []  # guardar para visualización
+        self.papr_values = []
+        for sym_idx in range(num_symbols):
+            # Inicializar vector de subportadoras
+            subc = np.zeros(self.fft_size, dtype=complex)
+            # Datos
+            for i, idx in enumerate(self.data_indices):
+                subc[idx] = data_2d[sym_idx, i]
+            # Pilotos
+            for i, idx in enumerate(self.pilot_indices):
+                subc[idx] = pilot_vals[i]
+            self.subcarrier_grid.append(subc.copy())
+            # IFFT
+            time_domain = np.fft.ifft(subc) * np.sqrt(self.fft_size)
+            # Calcular PAPR
+            power = np.abs(time_domain)**2
+            avg_power = np.mean(power)
+            papr = 10 * np.log10(np.max(power) / (avg_power + 1e-12))
+            self.papr_values.append(papr)
+            # Prefijo cíclico
+            cp = time_domain[-self.cp_len:]
+            tx_symbol = np.concatenate([cp, time_domain])
+            tx_signal.append(tx_symbol)
+        self.tx_signal = np.concatenate(tx_signal)
+        self.num_ofdm_symbols = num_symbols
+        return self.tx_signal
 
-def insert_pilots(symbols, Nfft, pilot_spacing, pilot_value):
-    pad = (-len(symbols)) % Nfft
-    if pad:
-        symbols = np.pad(symbols, (0, pad), constant_values=0)
-    frames = symbols.reshape(-1, Nfft)
-    data_mask = np.ones(Nfft, dtype=bool)
-    data_mask[::pilot_spacing] = False
-    for frame in frames:
-        frame[~data_mask] = pilot_value
-    return frames.reshape(-1), data_mask
-
-def calculate_papr(x):
-    power = np.abs(x)**2
-    mean_pow = np.mean(power)
-    if mean_pow == 0:
-        return 0.0
-    return 10 * np.log10(np.max(power) / mean_pow)
-
-def ofdm_tx_block(symbols, Nfft, cp_len):
-    pad = (-len(symbols)) % Nfft
-    if pad:
-        symbols = np.pad(symbols, (0, pad), constant_values=0)
-    frames = symbols.reshape(-1, Nfft)
-    x = np.fft.ifft(frames, axis=1)
-    papr_list = [calculate_papr(xi) for xi in x]
-    if cp_len > 0:
-        cp = x[:, -cp_len:]
-        tx = np.concatenate([cp, x], axis=1)
-    else:
-        tx = x
-    return tx.reshape(-1), papr_list
+    def get_info(self):
+        return {
+            'fft_size': self.fft_size,
+            'cp_len': self.cp_len,
+            'num_data_subc': self.num_data,
+            'num_pilot_subc': self.num_pilots,
+            'num_total_subc': self.params.N_total_subcarriers,
+            'num_useful_subc': self.params.N_useful_subcarriers,
+            'num_ofdm_symbols': self.num_ofdm_symbols,
+            'total_data_symbols': self.num_data * self.num_ofdm_symbols
+        }
