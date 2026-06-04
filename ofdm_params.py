@@ -1,8 +1,4 @@
-# ofdm_params.py
 import numpy as np
-
-DELTA_F = 15000.0          # 15 kHz
-FC = 2.1e9                 # 2.1 GHz
 
 class OFDMParams:
     def __init__(self):
@@ -19,12 +15,10 @@ class OFDMParams:
         self.guard_band_ratio = 0.10
 
     def compute_subcarriers(self):
-        # Cálculo robusto sin np.log2 para evitar errores de tipo
         N_total = int(round(self.bandwidth_mhz * 1e6 / self.subcarrier_spacing))
         if N_total <= 0:
             N_total = 64
         N_useful = int(N_total * (1 - self.guard_band_ratio))
-        # Potencia de 2 más cercana (mayor o igual)
         self.fft_size = 1
         while self.fft_size < N_total:
             self.fft_size <<= 1

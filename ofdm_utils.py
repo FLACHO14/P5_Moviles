@@ -20,16 +20,17 @@ def image_to_bitstream(image_path, max_side=256):
         img = img.resize(new_size, Image.Resampling.LANCZOS)
     img_arr = np.array(img)
     bits = np.unpackbits(img_arr.flatten())
-    return bits, img_arr.shape, img_arr  # ahora devuelve también el array de la imagen
+    return bits, img_arr.shape
 
 def bitstream_to_image(bits, shape):
     if len(bits) % 8 != 0:
         bits = np.pad(bits, (0, 8 - len(bits) % 8), constant_values=0)
     img_bytes = np.packbits(bits)
-    if img_bytes.size > shape[0] * shape[1]:
-        img_bytes = img_bytes[:shape[0]*shape[1]]
-    elif img_bytes.size < shape[0] * shape[1]:
-        img_bytes = np.pad(img_bytes, (0, shape[0]*shape[1] - img_bytes.size), constant_values=0)
+    expected = shape[0] * shape[1]
+    if img_bytes.size > expected:
+        img_bytes = img_bytes[:expected]
+    elif img_bytes.size < expected:
+        img_bytes = np.pad(img_bytes, (0, expected - img_bytes.size), constant_values=0)
     img_arr = img_bytes.reshape(shape)
     return Image.fromarray(img_arr, mode='L')
 
@@ -39,13 +40,9 @@ def calculate_ber(bits_tx, bits_rx):
     return errors / min_len if min_len > 0 else 1.0
 
 def calculate_psnr(img_orig, img_rec):
-    # Asegurar que ambas imágenes tengan las mismas dimensiones
     if img_orig.shape != img_rec.shape:
-        # Redimensionar la imagen original al tamaño de la reconstruida
         from PIL import Image as PILImage
-        img_orig_pil = PILImage.fromarray(img_orig.astype('uint8'))
-        img_orig_pil = img_orig_pil.resize((img_rec.shape[1], img_rec.shape[0]), PILImage.Resampling.LANCZOS)
-        img_orig = np.array(img_orig_pil)
+        img_orig = np.array(PILImage.fromarray(img_orig.astype('uint8')).resize((img_rec.shape[1], img_rec.shape[0]), PILImage.LANCZOS))
     mse = np.mean((img_orig.astype(float) - img_rec.astype(float))**2)
     if mse == 0:
         return 100.0

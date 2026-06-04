@@ -25,7 +25,7 @@ class OFDMSimulator:
         self.original_bits = None
         self.image_shape = None
         self.image_path = None
-        self.original_img_arr = None  # Guardar array de imagen redimensionada
+        self.original_image_array = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -33,7 +33,6 @@ class OFDMSimulator:
         left.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
 
         ttk.Label(left, text="Parámetros OFDM", font=('Arial',12,'bold')).pack(pady=5)
-
         ttk.Button(left, text="Cargar Imagen", command=self.load_image).pack(pady=2)
         self.img_preview = ttk.Label(left)
         self.img_preview.pack()
@@ -108,6 +107,7 @@ class OFDMSimulator:
         self.create_tabs()
 
     def create_tabs(self):
+        # Pestaña 1: Imagen y constelaciones
         self.tab1 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab1, text="1. Imagen y Constelaciones")
         fig1 = Figure(figsize=(8,6))
@@ -118,23 +118,31 @@ class OFDMSimulator:
         self.ax_tx_img.set_title("Imagen TX")
         self.ax_tx_const.set_title("Constelación TX")
         self.ax_rx_img.set_title("Imagen RX")
-        self.ax_rx_const.set_title("Constelación RX (ecualizada)")
+        self.ax_rx_const.set_title("Constelación RX")
         self.canvas1 = FigureCanvasTkAgg(fig1, self.tab1)
         self.canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        toolbar1 = NavigationToolbar2Tk(self.canvas1, self.tab1)
-        toolbar1.update()
+        NavigationToolbar2Tk(self.canvas1, self.tab1)
         self.fig1 = fig1
 
+        # Pestaña 2: Subportadoras y Espectro (dos subplots)
         self.tab2 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab2, text="2. Subportadoras")
-        fig2 = Figure(figsize=(8,5))
-        self.ax_subc = fig2.add_subplot(111)
+        self.notebook.add(self.tab2, text="2. Subportadoras y Espectro")
+        fig2 = Figure(figsize=(8,7))
+        self.ax_subc = fig2.add_subplot(211)
+        self.ax_spectrum = fig2.add_subplot(212)
+        self.ax_subc.set_title("Subportadoras (primer símbolo OFDM)")
+        self.ax_subc.set_xlabel("Índice de subportadora")
+        self.ax_subc.set_ylabel("|Amplitud|")
+        self.ax_spectrum.set_xlabel("Frecuencia (MHz)")
+        self.ax_spectrum.set_ylabel("Magnitud (dB)")
+        self.ax_spectrum.set_title("Espectro de frecuencia (señal OFDM completa)")
+        self.ax_spectrum.grid(True)
         self.canvas2 = FigureCanvasTkAgg(fig2, self.tab2)
         self.canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        toolbar2 = NavigationToolbar2Tk(self.canvas2, self.tab2)
-        toolbar2.update()
+        NavigationToolbar2Tk(self.canvas2, self.tab2)
         self.fig2 = fig2
 
+        # Pestaña 3: Respuesta del Canal
         self.tab3 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab3, text="3. Respuesta del Canal")
         fig3 = Figure(figsize=(8,5))
@@ -142,27 +150,27 @@ class OFDMSimulator:
         self.ax_ch_freq = fig3.add_subplot(122)
         self.canvas3 = FigureCanvasTkAgg(fig3, self.tab3)
         self.canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        toolbar3 = NavigationToolbar2Tk(self.canvas3, self.tab3)
-        toolbar3.update()
+        NavigationToolbar2Tk(self.canvas3, self.tab3)
         self.fig3 = fig3
-        self.ch_class_label = ttk.Label(self.tab3, text="")
-        self.ch_class_label.pack()
+        self.ch_label = ttk.Label(self.tab3, text="")
+        self.ch_label.pack()
 
+        # Pestaña 4: Prefijo y PAPR
         self.tab4 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab4, text="4. Prefijo Cíclico y PAPR")
         fig4 = Figure(figsize=(8,6))
         self.ax_cp = fig4.add_subplot(221)
-        self.ax_papr_time = fig4.add_subplot(222)
+        self.ax_papr = fig4.add_subplot(222)
         self.ax_ccdf = fig4.add_subplot(223)
-        self.ax_papr_time.set_title("Potencia instantánea")
-        self.ax_ccdf.set_title("CCDF del PAPR")
+        self.ax_papr.set_title("Potencia instantánea")
+        self.ax_ccdf.set_title("CCDF PAPR")
         self.ax_ccdf.set_yscale('log')
         self.canvas4 = FigureCanvasTkAgg(fig4, self.tab4)
         self.canvas4.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        toolbar4 = NavigationToolbar2Tk(self.canvas4, self.tab4)
-        toolbar4.update()
+        NavigationToolbar2Tk(self.canvas4, self.tab4)
         self.fig4 = fig4
 
+        # Pestaña 5: Monte Carlo
         self.tab5 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab5, text="5. Monte Carlo")
         fig5 = Figure(figsize=(8,5))
@@ -173,24 +181,25 @@ class OFDMSimulator:
         self.ax_mc.grid(True)
         self.canvas5 = FigureCanvasTkAgg(fig5, self.tab5)
         self.canvas5.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        toolbar5 = NavigationToolbar2Tk(self.canvas5, self.tab5)
-        toolbar5.update()
+        NavigationToolbar2Tk(self.canvas5, self.tab5)
         self.fig5 = fig5
 
     def load_image(self):
         path = filedialog.askopenfilename(filetypes=[("Imágenes", "*.png *.jpg *.jpeg *.bmp")])
         if path:
             self.image_path = path
-            self.original_bits, self.image_shape, self.original_img_arr = image_to_bitstream(path, max_side=256)
+            self.original_image_array = np.array(Image.open(path).convert('L'))
+            self.original_bits, self.image_shape = image_to_bitstream(path, max_side=256)
             img = Image.open(path)
             img.thumbnail((120,120))
             self.img_tk = ImageTk.PhotoImage(img)
             self.img_preview.config(image=self.img_tk)
             self.img_info.config(text=f"{self.image_shape[1]}x{self.image_shape[0]}\nBits: {len(self.original_bits)}")
             self.update_bits_info()
-            # Mostrar imagen TX en la pestaña 1
+            # Mostrar imagen TX redimensionada
+            tx_img = np.array(Image.open(path).convert('L').resize((self.image_shape[1], self.image_shape[0]), Image.LANCZOS))
             self.ax_tx_img.clear()
-            self.ax_tx_img.imshow(self.original_img_arr, cmap='gray')
+            self.ax_tx_img.imshow(tx_img, cmap='gray')
             self.ax_tx_img.set_title("Imagen TX")
             self.ax_tx_img.axis('off')
             self.canvas1.draw()
@@ -220,7 +229,7 @@ class OFDMSimulator:
             self.params.compute_subcarriers()
         self.update_bits_info()
 
-    def set_busy(self, busy=True):
+    def set_busy(self, busy):
         state = tk.DISABLED if busy else tk.NORMAL
         self.btn_single.config(state=state)
         self.btn_mc.config(state=state)
@@ -245,84 +254,134 @@ class OFDMSimulator:
             mod = self.params.modulation
             M = {'QPSK':4, '16QAM':16, '64QAM':64}[mod]
             symbols_tx = bits_to_symbols(self.original_bits, M)
+            # Actualizar constelación TX
             self.root.after(0, lambda: self.update_tx_constellation(symbols_tx))
             tx = OFDMTransmitter(self.params)
             tx_signal = tx.create_ofdm_symbols(symbols_tx)
+            fs = self.params.bandwidth_mhz * 1e6
+            # Espectro
+            f_axis, psd = tx.get_spectrum(fs)
+            # Obtener subportadoras del primer símbolo
+            subcarriers = tx.get_first_subcarriers()
+            # Canal
             channel = OFDMChannel(self.params)
             rx_signal, taps, delays, (freq, H_f), ch_class = channel.apply_channel(tx_signal, self.params.snr_db)
+            # Receptor
             rx = OFDMReceiver(tx, self.params)
             bits_rx, raw_sym, eq_sym, _ = rx.process(rx_signal)
             ber = calculate_ber(self.original_bits, bits_rx)
-            rec_img_pil = bitstream_to_image(bits_rx, self.image_shape)
-            rec_img_arr = np.array(rec_img_pil)
-            # Calcular PSNR usando el array original redimensionado
-            psnr = calculate_psnr(self.original_img_arr, rec_img_arr)
-            self.root.after(0, lambda: self.update_plots(tx, raw_sym, eq_sym, taps, delays, freq, H_f, ch_class, rec_img_arr, ber, psnr))
-            self.root.after(0, lambda: messagebox.showinfo("Éxito", f"BER = {ber:.6f}\nPSNR = {psnr:.2f} dB"))
+            rec_img = bitstream_to_image(bits_rx, self.image_shape)
+            rec_img_np = np.array(rec_img)
+            # PSNR
+            psnr_val = calculate_psnr(self.original_image_array, rec_img_np)
+            # Actualizar GUI
+            self.root.after(0, lambda: self.update_plots(tx, rec_img_np, eq_sym, taps, delays, freq, H_f, ch_class, ber, psnr_val, f_axis, psd, subcarriers))
+            self.root.after(0, lambda: messagebox.showinfo("Éxito", f"BER = {ber:.6f}\nPSNR = {psnr_val:.2f} dB"))
         except Exception as e:
-            error_msg = traceback.format_exc()
-            self.root.after(0, lambda: messagebox.showerror("Error", f"{str(e)}\n\n{error_msg}"))
+            err = traceback.format_exc()
+            self.root.after(0, lambda: messagebox.showerror("Error", f"{str(e)}\n\n{err}"))
         finally:
             self.root.after(0, lambda: self.set_busy(False))
 
     def update_tx_constellation(self, symbols):
         self.ax_tx_const.clear()
-        lim = min(5000, len(symbols))
+        lim = min(3000, len(symbols))
         self.ax_tx_const.scatter(symbols.real[:lim], symbols.imag[:lim], s=1, alpha=0.5)
         self.ax_tx_const.set_title(f"Constelación TX - {self.params.modulation}")
         self.ax_tx_const.grid(True)
         self.canvas1.draw()
 
-    def update_plots(self, tx, raw_sym, eq_sym, taps, delays, freq, H_f, ch_class, rec_img_arr, ber, psnr):
+    def update_plots(self, tx, rec_img, eq_sym, taps, delays, freq, H_f, ch_class, ber, psnr, f_axis, psd, subcarriers):
+        # Imagen RX
         self.ax_rx_img.clear()
-        self.ax_rx_img.imshow(rec_img_arr, cmap='gray')
+        self.ax_rx_img.imshow(rec_img, cmap='gray')
         self.ax_rx_img.set_title(f"Imagen RX - BER={ber:.4f} PSNR={psnr:.1f}dB")
         self.ax_rx_img.axis('off')
+        # Constelación RX
         self.ax_rx_const.clear()
-        lim = min(5000, len(eq_sym))
+        lim = min(3000, len(eq_sym))
         self.ax_rx_const.scatter(eq_sym.real[:lim], eq_sym.imag[:lim], s=1, alpha=0.5, c='red')
         self.ax_rx_const.set_title("Constelación RX ecualizada")
         self.ax_rx_const.grid(True)
         self.canvas1.draw()
 
+        # --- Subportadoras (gráfica de barras) ---
         self.ax_subc.clear()
-        subc = tx.subcarrier_grid[0]
-        indices = np.arange(len(subc))
-        mask = np.abs(subc) > 0
-        self.ax_subc.bar(indices[mask], np.abs(subc[mask]), width=1.0, color='blue')
-        self.ax_subc.set_title(f"Subportadoras (FFT={tx.fft_size}, útiles={tx.params.N_useful_subcarriers}, pilotos={tx.num_pilots})")
-        self.ax_subc.set_xlim(0, tx.fft_size-1)
+        if subcarriers is not None:
+            indices = np.arange(len(subcarriers))
+            # Solo mostrar donde hay amplitud > 0 para claridad, pero podemos mostrar todas
+            # Usamos barras delgadas para simular el espectro de subportadoras
+            self.ax_subc.bar(indices, np.abs(subcarriers), width=1.0, color='blue', edgecolor='none', alpha=0.7)
+            # Resaltar subportadoras nulas (guard bands) con color rojo
+            # Las subportadoras útiles son un rango central, pero mejor pintar de rojo las que están fuera
+            offset = (tx.fft_size - tx.params.N_useful_subcarriers) // 2
+            useful_start = offset
+            useful_end = offset + tx.params.N_useful_subcarriers
+            # Pintar fondo de bandas de guarda
+            self.ax_subc.axvspan(0, useful_start, alpha=0.2, color='red', label='Guard bands')
+            self.ax_subc.axvspan(useful_end, tx.fft_size, alpha=0.2, color='red')
+            # Marcar posición de pilotos si se quiere
+            # Pilotos están en tx.pilot_indices
+            pilot_indices = tx.pilot_indices
+            for p in pilot_indices:
+                self.ax_subc.axvline(x=p, color='green', linestyle='--', linewidth=0.5, alpha=0.7)
+            self.ax_subc.set_xlim(0, tx.fft_size-1)
+            self.ax_subc.set_title(f"Subportadoras (FFT={tx.fft_size}, útiles={tx.params.N_useful_subcarriers}, pilotos={len(pilot_indices)})")
+            self.ax_subc.set_xlabel("Índice de subportadora")
+            self.ax_subc.set_ylabel("|Amplitud|")
+            self.ax_subc.legend(['Guard band', 'Piloto'], loc='upper right')
+        else:
+            self.ax_subc.text(0.5, 0.5, "No hay datos de subportadoras", transform=self.ax_subc.transAxes, ha='center')
         self.canvas2.draw()
 
+        # --- Espectro de frecuencia ---
+        self.ax_spectrum.clear()
+        f_mhz = f_axis / 1e6
+        self.ax_spectrum.plot(f_mhz, psd, 'b-', linewidth=1)
+        # Resaltar ancho de banda útil (desde -BW/2 a +BW/2)
+        bw_mhz = self.params.bandwidth_mhz
+        self.ax_spectrum.axvspan(-bw_mhz/2, bw_mhz/2, alpha=0.2, color='green', label='Ancho útil')
+        # Resaltar bandas de guarda (más allá de BW/2)
+        self.ax_spectrum.axvspan(-bw_mhz, -bw_mhz/2, alpha=0.1, color='red', label='Bandas guarda')
+        self.ax_spectrum.axvspan(bw_mhz/2, bw_mhz, alpha=0.1, color='red')
+        self.ax_spectrum.set_xlim(-bw_mhz, bw_mhz)
+        self.ax_spectrum.set_title(f"Espectro OFDM (fs={bw_mhz} MHz)")
+        self.ax_spectrum.set_xlabel("Frecuencia (MHz)")
+        self.ax_spectrum.set_ylabel("PSD (dB)")
+        self.ax_spectrum.grid(True)
+        self.ax_spectrum.legend()
+        self.canvas2.draw()
+
+        # Canal
         self.ax_ch_time.clear()
         self.ax_ch_time.stem(delays, np.abs(taps), basefmt=' ')
         self.ax_ch_time.set_title("Respuesta impulsional")
         self.ax_ch_time.set_xlabel("Retardo (muestras)")
-        self.ax_ch_time.set_ylabel("|h|")
         self.ax_ch_freq.clear()
         self.ax_ch_freq.plot(freq/1e3, 20*np.log10(np.abs(H_f)+1e-6))
         self.ax_ch_freq.set_title("Respuesta en frecuencia")
         self.ax_ch_freq.set_xlabel("Frecuencia (kHz)")
-        self.ax_ch_freq.set_ylabel("|H| (dB)")
         self.canvas3.draw()
-        self.ch_class_label.config(text=f"Clasificación del canal: {ch_class}")
+        self.ch_label.config(text=f"Clasificación: {ch_class}")
 
+        # Prefijo
         self.ax_cp.clear()
         sym_len = tx.fft_size + tx.cp_len
         y_cp = np.abs(tx.tx_signal[:sym_len])
         self.ax_cp.plot(y_cp)
         self.ax_cp.axvline(x=tx.cp_len, color='r', linestyle='--', label='Fin CP')
-        self.ax_cp.fill_between(range(tx.cp_len), y_cp[:tx.cp_len], alpha=0.3, label='CP')
-        self.ax_cp.set_title(f"Prefijo cíclico (longitud={tx.cp_len})")
+        self.ax_cp.fill_between(range(tx.cp_len), y_cp[:tx.cp_len], alpha=0.3)
+        self.ax_cp.set_title(f"Prefijo Cíclico (len={tx.cp_len})")
         self.ax_cp.legend()
+        # PAPR
         power = np.abs(tx.tx_signal)**2
         avg_power = np.mean(power)
         papr = 10*np.log10(np.max(power)/avg_power)
-        self.ax_papr_time.clear()
-        self.ax_papr_time.plot(power, alpha=0.7)
-        self.ax_papr_time.axhline(y=avg_power, color='r', linestyle='--', label=f'Prom={avg_power:.2f}')
-        self.ax_papr_time.set_title(f"PAPR = {papr:.2f} dB")
-        self.ax_papr_time.legend()
+        self.ax_papr.clear()
+        self.ax_papr.plot(power, alpha=0.7)
+        self.ax_papr.axhline(y=avg_power, color='r', linestyle='--', label=f'Prom={avg_power:.2f}')
+        self.ax_papr.set_title(f"PAPR = {papr:.2f} dB")
+        self.ax_papr.legend()
         papr_vals = 10*np.log10(power/avg_power + 1e-12)
         hist, bins = np.histogram(papr_vals, bins=50, density=True)
         ccdf = 1 - np.cumsum(hist) * (bins[1]-bins[0])
@@ -358,13 +417,13 @@ class OFDMSimulator:
                 for snr in snr_range:
                     bers = []
                     for _ in range(10):
-                        symbols_tx = bits_to_symbols(bits_pad, M)
+                        sym = bits_to_symbols(bits_pad, M)
                         tx = OFDMTransmitter(self.params)
-                        tx_signal = tx.create_ofdm_symbols(symbols_tx)
-                        channel = OFDMChannel(self.params)
-                        rx_signal, _, _, _, _ = channel.apply_channel(tx_signal, snr)
-                        rx = OFDMReceiver(tx, self.params)
-                        bits_rx, _, _, _ = rx.process(rx_signal)
+                        tx_signal = tx.create_ofdm_symbols(sym)
+                        ch = OFDMChannel(self.params)
+                        rx, _, _, _, _ = ch.apply_channel(tx_signal, snr)
+                        rx_obj = OFDMReceiver(tx, self.params)
+                        bits_rx, _, _, _ = rx_obj.process(rx)
                         bits_rx = bits_rx[:total_bits]
                         ber = calculate_ber(self.original_bits, bits_rx)
                         bers.append(ber)
@@ -373,15 +432,14 @@ class OFDMSimulator:
                     ci = 1.96 * std_ber / np.sqrt(10)
                     results[mod]['mean'].append(mean_ber)
                     results[mod]['ci'].append(ci)
-                    self.root.after(0, lambda m=mod, snr_idx=len(results[mod]['mean'])-1: self.update_mc_plot(snr_range, modulations, results, m, snr_idx))
-            self.root.after(0, lambda: messagebox.showinfo("Monte Carlo", "Simulación completada"))
+                    self.root.after(0, lambda m=mod: self.update_mc_plot(snr_range, modulations, results))
+            self.root.after(0, lambda: messagebox.showinfo("Monte Carlo", "Completado"))
         except Exception as e:
-            error_msg = traceback.format_exc()
-            self.root.after(0, lambda: messagebox.showerror("Error", f"{str(e)}\n\n{error_msg}"))
+            self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
         finally:
             self.root.after(0, lambda: self.set_busy(False))
 
-    def update_mc_plot(self, snr_range, modulations, results, current_mod, idx):
+    def update_mc_plot(self, snr_range, modulations, results):
         self.ax_mc.clear()
         for mod in modulations:
             y = results[mod]['mean']
@@ -391,11 +449,9 @@ class OFDMSimulator:
         self.ax_mc.set_xlabel("SNR (dB)")
         self.ax_mc.set_ylabel("BER")
         self.ax_mc.set_yscale('log')
-        self.ax_mc.set_title("Curvas BER vs SNR (95% de confianza)")
         self.ax_mc.grid(True)
         self.ax_mc.legend()
         self.canvas5.draw()
-        self.root.update_idletasks()
 
 if __name__ == "__main__":
     root = tk.Tk()
