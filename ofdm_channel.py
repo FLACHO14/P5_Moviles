@@ -22,7 +22,7 @@ def get_channel_profile(profile_name, taps_L=None, seed=None):
     elif 'rayleigh' in name:
         return multipath_rayleigh_channel(taps_L, seed)
     elif 'rician' in name:
-        return multipath_rician_channel(taps_L, seed)
+        return multipath_rician_channel(taps_L, seed=seed)
     elif 'epa' in name or 'suburbano' in name:
         delays_us = np.array([0.0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.24])
         powers_dB = np.array([0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0])
