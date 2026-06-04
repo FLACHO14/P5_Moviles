@@ -363,6 +363,7 @@ class OFDM_Simulator:
                 f"N_used: {N_used} ({N_used*100//Nfft}% de {Nfft})\n"
                 f"Datos: {sc_map['n_data']}  Pilotos: {sc_map['n_pilots']}\n"
                 f"Guarda+DC: {sc_map['n_guard']}\n"
+                f"Bits/símbolo OFDM: {bits_per_ofdm}\n"
                 f"Ejecuciones IFFT: {n_ofdm}\n\n"
                 f"--- IMAGEN ({mod_name}) ---\n"
                 f"Tamaño: {w_px}×{h_px} px\n"
