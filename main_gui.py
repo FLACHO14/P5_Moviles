@@ -600,12 +600,15 @@ class OFDM_Simulator:
 
     def _render_tab5(self, d):
         self._clear_tab(self.tab5)
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.tight_layout(pad=3.5)
+        fig, axes = plt.subplots(3, 2, figsize=(14, 20))
+        fig.subplots_adjust(
+            left=0.08, right=0.96, top=0.96, bottom=0.04,
+            hspace=0.40, wspace=0.28,
+        )
 
         snr_arr = np.array(d["snr_list"])
 
-        # [0,0] BER vs SNR con pilotos + IC 95%
+        # [0,0] BER vs SNR OFDM con pilotos + IC 95%
         any_plotted = False
         for mod_name, ber_info in d["ber_data"].items():
             means = np.array(ber_info["mean"])
@@ -629,13 +632,43 @@ class OFDM_Simulator:
                 0.5, 0.5, "BER = 0 en todos los puntos",
                 ha="center", va="center", transform=axes[0, 0].transAxes,
             )
-        axes[0, 0].set_title("BER vs SNR (con pilotos + IC 95%)")
+        axes[0, 0].set_title("OFDM — BER vs SNR (pilotos + IC 95%)")
         axes[0, 0].set_xlabel("SNR (dB)")
         axes[0, 0].set_ylabel("BER")
         axes[0, 0].legend(fontsize=8)
         axes[0, 0].grid(True, which="both", alpha=0.3)
 
-        # [0,1] Comparación con pilotos (sólido) vs sin ecualización (punteado)
+        # [0,1] BER vs SNR SC-FDMA con pilotos + IC 95%
+        any_plotted_sc = False
+        for mod_name, ber_info in d["ber_data_sc"].items():
+            means = np.array(ber_info["mean"])
+            cis = np.array(ber_info["ci"])
+            mask = means > 0
+            if np.any(mask):
+                s = snr_arr[mask]
+                m = means[mask]
+                c = cis[mask]
+                axes[0, 1].semilogy(
+                    s, m, marker="s", label=mod_name, color=MOD_COLORS[mod_name],
+                )
+                upper = m + c
+                lower = np.maximum(m - c, 1e-10)
+                axes[0, 1].fill_between(
+                    s, lower, upper, alpha=0.2, color=MOD_COLORS[mod_name],
+                )
+                any_plotted_sc = True
+        if not any_plotted_sc:
+            axes[0, 1].text(
+                0.5, 0.5, "BER = 0 en todos los puntos",
+                ha="center", va="center", transform=axes[0, 1].transAxes,
+            )
+        axes[0, 1].set_title(f"SC-FDMA (DFT={d['M_dft']}) — BER vs SNR (pilotos + IC 95%)")
+        axes[0, 1].set_xlabel("SNR (dB)")
+        axes[0, 1].set_ylabel("BER")
+        axes[0, 1].legend(fontsize=8)
+        axes[0, 1].grid(True, which="both", alpha=0.3)
+
+        # [1,0] Comparación con pilotos vs sin ecualización (OFDM)
         for mod_name in d["ber_data"]:
             m_eq = np.array(d["ber_data"][mod_name]["mean"])
             m_noeq = np.array(d["ber_no_eq"][mod_name]["mean"])
@@ -643,38 +676,51 @@ class OFDM_Simulator:
 
             mask_eq = m_eq > 0
             if np.any(mask_eq):
-                axes[0, 1].semilogy(
+                axes[1, 0].semilogy(
                     snr_arr[mask_eq], m_eq[mask_eq],
                     marker="o", color=color, label=f"{mod_name} (pilotos)",
                 )
             mask_noeq = m_noeq > 0
             if np.any(mask_noeq):
-                axes[0, 1].semilogy(
+                axes[1, 0].semilogy(
                     snr_arr[mask_noeq], m_noeq[mask_noeq],
                     marker="x", linestyle="--", color=color,
                     label=f"{mod_name} (sin ecual.)", alpha=0.7,
                 )
-        axes[0, 1].set_title("Efecto de Ecualización por Pilotos")
-        axes[0, 1].set_xlabel("SNR (dB)")
-        axes[0, 1].set_ylabel("BER")
-        axes[0, 1].legend(fontsize=7)
-        axes[0, 1].grid(True, which="both", alpha=0.3)
-
-        # [1,0] CCDF del PAPR
-        for mod_name, (papr_sorted, ccdf) in d["ccdf_data"].items():
-            axes[1, 0].semilogy(
-                papr_sorted, ccdf, label=mod_name, color=MOD_COLORS[mod_name],
-            )
-        axes[1, 0].set_title("CCDF del PAPR")
-        axes[1, 0].set_xlabel("PAPR (dB)")
-        axes[1, 0].set_ylabel("Prob{PAPR > x}")
-        axes[1, 0].legend(fontsize=8)
+        axes[1, 0].set_title("Efecto de Ecualización por Pilotos")
+        axes[1, 0].set_xlabel("SNR (dB)")
+        axes[1, 0].set_ylabel("BER")
+        axes[1, 0].legend(fontsize=7)
         axes[1, 0].grid(True, which="both", alpha=0.3)
 
-        # [1,1] Potencia instantánea vs promedio (PAPR en tiempo)
+        # [1,1] CCDF del PAPR — OFDM (sólido) vs SC-FDMA (punteado)
+        for mod_name, (papr_sorted, ccdf) in d["ccdf_data"].items():
+            color = MOD_COLORS[mod_name]
+            axes[1, 1].semilogy(
+                papr_sorted, ccdf, color=color, label=f"{mod_name} OFDM",
+            )
+        for mod_name, (papr_sorted, ccdf) in d["ccdf_data_sc"].items():
+            color = MOD_COLORS[mod_name]
+            axes[1, 1].semilogy(
+                papr_sorted, ccdf, color=color, linestyle="--",
+                label=f"{mod_name} SC-FDMA", alpha=0.8,
+            )
+        axes[1, 1].set_title("CCDF PAPR — OFDM vs SC-FDMA")
+        axes[1, 1].set_xlabel("PAPR (dB)")
+        axes[1, 1].set_ylabel("Prob{PAPR > x}")
+        axes[1, 1].legend(fontsize=7)
+        axes[1, 1].grid(True, which="both", alpha=0.3)
+
+        # [2,0] Potencia instantánea OFDM
         ofdm_utils.plot_papr_time_domain(
-            axes[1, 1], d["tx_signal"], d["Nfft"], d["cp_len"]
+            axes[2, 0], d["tx_signal"], d["Nfft"], d["cp_len"]
         )
+
+        # [2,1] Potencia instantánea SC-FDMA
+        ofdm_utils.plot_papr_time_domain(
+            axes[2, 1], d["tx_signal_sc"], d["Nfft"], d["cp_len"]
+        )
+        axes[2, 1].set_title("Potencia de un Símbolo SC-FDMA")
 
         self._embed(fig, self.tab5)
 
