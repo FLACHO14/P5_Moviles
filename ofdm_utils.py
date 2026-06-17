@@ -514,3 +514,257 @@ def plot_papr_time_domain(ax, tx_signal, Nfft, cp_len):
             cp_len / 2, ymax - (ymax - ymin) * 0.05, "CP",
             ha="center", fontsize=8, color="gray",
         )
+
+
+# ===================================================================
+# SC-FDMA: Análisis comparativo
+# ===================================================================
+
+def build_scfdma_map(sc_map, M_dft):
+    """Subcarrier map para SC-FDMA: solo M_dft subportadoras de datos."""
+    sc = dict(sc_map)
+    all_data = sc_map["data_indices"]
+    sc["data_indices"] = all_data[:M_dft]
+    sc["n_data"] = M_dft
+    unused = all_data[M_dft:]
+    sc["n_guard"] = sc_map["n_guard"] + len(unused)
+    return sc
+
+
+def run_analysis_scfdma(
+    bits_tx, Nfft, cp_len, sc_map, pilot_value,
+    chan_profile, taps_L, snr_list, n_mc, velocity_kmh, M_dft,
+):
+    """Monte Carlo BER + CCDF PAPR para SC-FDMA."""
+    import ofdm_tx
+    import ofdm_channel
+    import ofdm_rx
+
+    sc_map_sc = build_scfdma_map(sc_map, M_dft)
+    mods = {"QPSK": 4, "16QAM": 16, "64QAM": 64}
+    ber_data = {}
+    ccdf_data = {}
+
+    fs = Nfft * DELTA_F
+    n_data = M_dft
+
+    for mod_name, M in mods.items():
+        k = int(np.log2(M))
+        bits_per_ofdm = n_data * k
+        pad = (-len(bits_tx)) % bits_per_ofdm
+        bits_in = np.pad(bits_tx, (0, pad), constant_values=0) if pad else bits_tx.copy()
+
+        n_papr_syms = 1000
+        bits_rand = np.random.randint(0, 2, n_papr_syms * n_data * k).astype(np.uint8)
+        s_rand = ofdm_tx.qam_mod(bits_rand, M)
+        _, papr_vals, _ = ofdm_tx.scfdma_tx_block(
+            s_rand, Nfft, cp_len, sc_map, pilot_value, M_dft
+        )
+        papr_sorted = np.sort(papr_vals)
+        ccdf = 1.0 - np.arange(1, len(papr_sorted) + 1) / len(papr_sorted)
+        ccdf_data[mod_name] = (papr_sorted, ccdf)
+
+        ber_means, ber_cis = [], []
+        for snr_db in snr_list:
+            ber_iters = []
+            for _ in range(n_mc):
+                s = ofdm_tx.qam_mod(bits_in, M)
+                tx, _, _ = ofdm_tx.scfdma_tx_block(
+                    s, Nfft, cp_len, sc_map, pilot_value, M_dft
+                )
+
+                h = ofdm_channel.get_channel_profile(chan_profile, taps_L)
+                rx, _ = ofdm_channel.apply_channel(tx, h, snr_db, velocity_kmh, fs=fs)
+
+                Y = ofdm_rx.ofdm_rx_block(rx, Nfft, cp_len)
+                Xhat, _ = ofdm_rx.equalize_with_pilots(Y, sc_map_sc, pilot_value, Nfft)
+                Xhat = ofdm_rx.scfdma_despread(Xhat, M_dft)
+
+                bits_hat = ofdm_rx.qam_demod(Xhat, M)[: len(bits_in)]
+                if len(bits_hat) < len(bits_in):
+                    bits_hat = np.pad(bits_hat, (0, len(bits_in) - len(bits_hat)))
+                ber_iters.append(np.mean(bits_hat != bits_in))
+
+            m_eq = np.mean(ber_iters)
+            s_eq = np.std(ber_iters, ddof=1) if n_mc > 1 else 0
+            ber_means.append(m_eq)
+            ber_cis.append(1.96 * s_eq / np.sqrt(n_mc))
+
+        ber_data[mod_name] = {"mean": ber_means, "ci": ber_cis}
+
+    return ber_data, ccdf_data
+
+
+def compute_papr_vs_snr_scfdma(
+    Nfft, cp_len, M_mod, sc_map, pilot_value, snr_list, M_dft, n_mc=10, n_symbols=100
+):
+    """PAPR medio e IC 95% para SC-FDMA."""
+    import ofdm_tx
+
+    k = int(np.log2(M_mod))
+    n_data = M_dft
+    papr_means, papr_stds = [], []
+
+    for _ in snr_list:
+        papr_vals = []
+        for _ in range(n_mc):
+            bits = np.random.randint(0, 2, n_symbols * n_data * k).astype(np.uint8)
+            sym = ofdm_tx.qam_mod(bits, M_mod)
+            _, papr_list, _ = ofdm_tx.scfdma_tx_block(
+                sym, Nfft, cp_len, sc_map, pilot_value, M_dft
+            )
+            papr_vals.append(np.max(papr_list))
+        papr_means.append(np.mean(papr_vals))
+        papr_stds.append(np.std(papr_vals))
+
+    conf_intervals = [1.96 * s / np.sqrt(n_mc) for s in papr_stds]
+    return papr_means, conf_intervals
+
+
+def plot_comparative_subcarrier_maps(ax_ofdm, ax_scfdma, sc_map, sc_map_sc, Nfft, M_dft):
+    """Mapas de subportadoras comparativos OFDM vs SC-FDMA."""
+    cmap = ListedColormap(["#95a5a6", "#2ecc71", "#e74c3c"])
+
+    for ax, smap, title in [
+        (ax_ofdm, sc_map, f"OFDM (Nfft={Nfft})"),
+        (ax_scfdma, sc_map_sc, f"SC-FDMA (DFT={M_dft}, IFFT={Nfft})"),
+    ]:
+        type_arr = np.zeros(Nfft, dtype=int)
+        type_arr[smap["data_indices"]] = 1
+        type_arr[smap["pilot_indices"]] = 2
+        freq_order = np.fft.fftshift(type_arr)
+        ax.imshow(
+            freq_order.reshape(1, -1), aspect="auto", cmap=cmap,
+            extent=[-Nfft // 2, Nfft // 2, -0.5, 0.5],
+            vmin=0, vmax=2, interpolation="nearest",
+        )
+        legend_el = [
+            Patch(facecolor="#95a5a6", label=f'Guarda+DC ({smap["n_guard"]})'),
+            Patch(facecolor="#2ecc71", label=f'Datos ({smap["n_data"]})'),
+            Patch(facecolor="#e74c3c", label=f'Pilotos ({smap["n_pilots"]})'),
+        ]
+        ax.legend(handles=legend_el, loc="upper right", fontsize=7)
+        ax.set_title(title)
+        ax.set_xlabel("Subportadora (centrada en DC)")
+        ax.set_yticks([])
+
+
+def plot_comparative_subcarrier_count(ax, sc_map, sc_map_sc, Nfft, M_dft):
+    """Barras agrupadas de conteo de subportadoras OFDM vs SC-FDMA."""
+    labels = ["Datos", "Pilotos", "Guarda+DC", "Total"]
+    ofdm_vals = [sc_map["n_data"], sc_map["n_pilots"], sc_map["n_guard"], Nfft]
+    sc_vals = [sc_map_sc["n_data"], sc_map_sc["n_pilots"], sc_map_sc["n_guard"], Nfft]
+
+    x = np.arange(len(labels))
+    w = 0.35
+    b1 = ax.bar(x - w / 2, ofdm_vals, w, label="OFDM", color="#3498db", alpha=0.85)
+    b2 = ax.bar(x + w / 2, sc_vals, w, label="SC-FDMA", color="#e67e22", alpha=0.85)
+
+    ax.set_title("Conteo de Subportadoras")
+    ax.set_ylabel("Cantidad")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.legend(fontsize=8)
+
+    for bars in [b1, b2]:
+        for bar in bars:
+            h = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2, h + 0.5,
+                    str(int(h)), ha="center", fontsize=8, fontweight="bold")
+
+
+def plot_comparative_bandwidth(ax, sc_map, sc_map_sc, delta_f, M_dft):
+    """Ancho de banda efectivo OFDM vs SC-FDMA."""
+    bw_ofdm = sc_map["n_data"] * delta_f / 1e6
+    bw_sc = sc_map_sc["n_data"] * delta_f / 1e6
+    bw_total = sc_map["n_used"] * delta_f / 1e6
+
+    labels = ["BW Total\n(usado)", "BW Datos\nOFDM", "BW Datos\nSC-FDMA"]
+    vals = [bw_total, bw_ofdm, bw_sc]
+    colors = ["#95a5a6", "#3498db", "#e67e22"]
+
+    bars = ax.bar(labels, vals, color=colors)
+    ax.set_title("Ancho de Banda Efectivo (MHz)")
+    ax.set_ylabel("MHz")
+    for bar, v in zip(bars, vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, v + 0.01,
+                f"{v:.3f}", ha="center", fontsize=9, fontweight="bold")
+    ax.grid(True, alpha=0.3, axis="y")
+
+
+def plot_comparative_ber(ax, snr_list, ber_ofdm, ber_scfdma, mod_colors):
+    """BER OFDM (sólido) vs SC-FDMA (punteado) para cada modulación."""
+    snr_arr = np.array(snr_list)
+    for mod_name in ber_ofdm:
+        color = mod_colors.get(mod_name, "#333")
+        m_ofdm = np.array(ber_ofdm[mod_name]["mean"])
+        m_sc = np.array(ber_scfdma[mod_name]["mean"])
+
+        mask_o = m_ofdm > 0
+        if np.any(mask_o):
+            ax.semilogy(snr_arr[mask_o], m_ofdm[mask_o],
+                        marker="o", color=color, label=f"{mod_name} OFDM")
+        mask_s = m_sc > 0
+        if np.any(mask_s):
+            ax.semilogy(snr_arr[mask_s], m_sc[mask_s],
+                        marker="s", linestyle="--", color=color,
+                        label=f"{mod_name} SC-FDMA", alpha=0.8)
+
+    if not any(np.any(np.array(ber_ofdm[m]["mean"]) > 0) for m in ber_ofdm):
+        ax.text(0.5, 0.5, "BER = 0 en todos los puntos",
+                ha="center", va="center", transform=ax.transAxes)
+    ax.set_title("BER: OFDM vs SC-FDMA")
+    ax.set_xlabel("SNR (dB)")
+    ax.set_ylabel("BER")
+    ax.legend(fontsize=7)
+    ax.grid(True, which="both", alpha=0.3)
+
+
+def plot_comparative_ccdf(ax, ccdf_ofdm, ccdf_scfdma, mod_colors):
+    """CCDF del PAPR comparativa."""
+    for mod_name in ccdf_ofdm:
+        color = mod_colors.get(mod_name, "#333")
+        p_o, c_o = ccdf_ofdm[mod_name]
+        p_s, c_s = ccdf_scfdma[mod_name]
+        ax.semilogy(p_o, c_o, color=color, label=f"{mod_name} OFDM")
+        ax.semilogy(p_s, c_s, color=color, linestyle="--",
+                    label=f"{mod_name} SC-FDMA", alpha=0.8)
+    ax.set_title("CCDF PAPR: OFDM vs SC-FDMA")
+    ax.set_xlabel("PAPR (dB)")
+    ax.set_ylabel("Prob{PAPR > x}")
+    ax.legend(fontsize=7)
+    ax.grid(True, which="both", alpha=0.3)
+
+
+def plot_comparative_symbol_power(ax, tx_ofdm, tx_scfdma, Nfft, cp_len):
+    """Potencia instantánea de un símbolo OFDM vs SC-FDMA (superpuestas)."""
+    sym_len = Nfft + cp_len
+    if len(tx_ofdm) < sym_len or len(tx_scfdma) < sym_len:
+        return
+
+    for signal, label, color, alpha in [
+        (tx_ofdm, "OFDM", "#3498db", 0.9),
+        (tx_scfdma, "SC-FDMA", "#e67e22", 0.85),
+    ]:
+        symbol = signal[:sym_len]
+        power = np.abs(symbol) ** 2
+        mean_pow = np.mean(power)
+        if mean_pow == 0:
+            continue
+        papr = 10 * np.log10(np.max(power) / mean_pow)
+        power_dB = 10 * np.log10(power + 1e-20)
+        t = np.arange(len(symbol))
+        ax.plot(t, power_dB, color=color, alpha=alpha,
+                label=f"{label} (PAPR={papr:.2f} dB)")
+
+    ax.set_title("Potencia Instantánea: OFDM vs SC-FDMA")
+    ax.set_xlabel("Muestra")
+    ax.set_ylabel("Potencia (dB)")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    if cp_len > 0:
+        ax.axvspan(0, cp_len, alpha=0.1, color="gray")
+        ymin, ymax = ax.get_ylim()
+        ax.text(cp_len / 2, ymax - (ymax - ymin) * 0.05, "CP",
+                ha="center", fontsize=8, color="gray")

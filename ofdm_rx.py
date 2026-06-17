@@ -169,3 +169,18 @@ def qam_demod(symbols, M):
     bi = ((ii[:, None] >> np.arange(kb - 1, -1, -1)) & 1).astype(np.uint8)
     bq = ((qq[:, None] >> np.arange(kb - 1, -1, -1)) & 1).astype(np.uint8)
     return np.concatenate([bi, bq], axis=1).reshape(-1).astype(np.uint8)
+
+
+def scfdma_despread(eq_symbols, M_dft):
+    """IDFT de-spreading para SC-FDMA: deshace el DFT precoding del TX."""
+    n_total = len(eq_symbols)
+    n_ofdm = n_total // M_dft
+    if n_ofdm == 0:
+        return eq_symbols
+    used = eq_symbols[: n_ofdm * M_dft].reshape(n_ofdm, M_dft)
+    despread = np.fft.ifft(used, axis=1)
+    result = despread.reshape(-1)
+    remaining = eq_symbols[n_ofdm * M_dft :]
+    if len(remaining) > 0:
+        result = np.concatenate([result, remaining])
+    return result

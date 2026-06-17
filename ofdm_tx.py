@@ -108,3 +108,54 @@ def ofdm_tx_block(data_symbols, Nfft, cp_len, sc_map, pilot_value):
             tx_signal[offset : offset + sym_len] = x
 
     return tx_signal, papr_list, n_ofdm
+
+
+def get_best_dft_size(n_data, Nfft):
+    """Calcula el mejor tamaño de DFT para SC-FDMA (potencia de 2, < Nfft, <= n_data)."""
+    max_m = min(n_data, Nfft - 1)
+    if max_m < 2:
+        return 2
+    return 2 ** int(np.floor(np.log2(max_m)))
+
+
+def scfdma_tx_block(data_symbols, Nfft, cp_len, sc_map, pilot_value, M_dft):
+    """SC-FDMA TX: QAM → DFT(M_dft) → mapeo subportadoras → IFFT(Nfft) → CP.
+
+    La FFT previa (DFT precoding) reduce el PAPR al hacer que la señal
+    temporal se asemeje a portadora única.
+    """
+    n_data = M_dft
+    n_ofdm = int(np.ceil(len(data_symbols) / n_data))
+
+    total_data = n_ofdm * n_data
+    pad = total_data - len(data_symbols)
+    if pad > 0:
+        data_symbols = np.concatenate([data_symbols, np.zeros(pad, dtype=complex)])
+
+    data_frames = data_symbols.reshape(n_ofdm, n_data)
+
+    sym_len = Nfft + cp_len
+    tx_signal = np.zeros(n_ofdm * sym_len, dtype=complex)
+    papr_list = []
+
+    data_idx = sc_map["data_indices"][:M_dft]
+    pilot_idx = sc_map["pilot_indices"]
+
+    for i in range(n_ofdm):
+        X_dft = np.fft.fft(data_frames[i], n=M_dft)
+
+        X = np.zeros(Nfft, dtype=complex)
+        X[data_idx] = X_dft
+        X[pilot_idx] = pilot_value
+
+        x = np.fft.ifft(X)
+        papr_list.append(calculate_papr(x))
+
+        offset = i * sym_len
+        if cp_len > 0:
+            tx_signal[offset : offset + cp_len] = x[-cp_len:]
+            tx_signal[offset + cp_len : offset + sym_len] = x
+        else:
+            tx_signal[offset : offset + sym_len] = x
+
+    return tx_signal, papr_list, n_ofdm

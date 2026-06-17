@@ -153,6 +153,8 @@ class OFDM_Simulator:
         self.notebook.add(self.tab4, text="4. Prefijo Cíclico")
         self.tab5 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab5, text="5. BER y PAPR")
+        self.tab6 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab6, text="6. OFDM vs SC-FDMA")
 
     # helpers para layout compacto
     def _row(self, parent, label, var):
@@ -354,6 +356,51 @@ class OFDM_Simulator:
                 papr_means[mn] = means
                 papr_ci[mn] = cis
 
+            # -- SC-FDMA --
+            self._status("Ejecutando SC-FDMA...\n(comparación con OFDM)")
+            M_dft = ofdm_tx.get_best_dft_size(sc_map["n_data"], Nfft)
+            sc_map_sc = ofdm_utils.build_scfdma_map(sc_map, M_dft)
+
+            # TX SC-FDMA (misma imagen, misma modulación)
+            k_sc = int(np.log2(M))
+            n_data_sc = M_dft
+            bits_per_ofdm_sc = n_data_sc * k_sc
+            n_ofdm_sc_needed = int(np.ceil(n_bits / bits_per_ofdm_sc))
+            total_bits_sc = n_ofdm_sc_needed * bits_per_ofdm_sc
+            pad_bits_sc = total_bits_sc - n_bits
+            bits_in_sc = np.pad(bits_tx, (0, pad_bits_sc)) if pad_bits_sc else bits_tx.copy()
+
+            symbols_tx_sc = ofdm_tx.qam_mod(bits_in_sc, M)
+            tx_signal_sc, papr_list_sc, n_ofdm_sc = ofdm_tx.scfdma_tx_block(
+                symbols_tx_sc, Nfft, cp_len, sc_map, pilot_value, M_dft
+            )
+
+            # Canal SC-FDMA (mismo canal)
+            rx_signal_sc, _ = ofdm_channel.apply_channel(
+                tx_signal_sc, h_impulse, snr_sim, velocity, fs=fs
+            )
+
+            # RX SC-FDMA
+            Y_frames_sc = ofdm_rx.ofdm_rx_block(rx_signal_sc, Nfft, cp_len)
+            Xhat_sc, _ = ofdm_rx.equalize_with_pilots(
+                Y_frames_sc, sc_map_sc, pilot_value, Nfft
+            )
+            Xhat_sc = ofdm_rx.scfdma_despread(Xhat_sc, M_dft)
+            bits_rx_sc = ofdm_rx.qam_demod(Xhat_sc, M)
+
+            if len(bits_rx_sc) < total_bits_sc:
+                bits_rx_sc = np.pad(bits_rx_sc, (0, total_bits_sc - len(bits_rx_sc)))
+            else:
+                bits_rx_sc = bits_rx_sc[:total_bits_sc]
+            ber_img_sc = np.mean(bits_rx_sc[:n_bits] != bits_tx)
+
+            # Monte Carlo SC-FDMA
+            self._status("Monte Carlo SC-FDMA...\n(puede tardar)")
+            ber_data_sc, ccdf_data_sc = ofdm_utils.run_analysis_scfdma(
+                bits_tx, Nfft, cp_len, sc_map, pilot_value,
+                profile, taps_L, self.snr_list, n_mc, velocity, M_dft,
+            )
+
             # -- Reporte --
             h_px, w_px = img_arr.shape
             report = (
@@ -361,17 +408,21 @@ class OFDM_Simulator:
                 f"Nfft: {Nfft}  |  CP: {cp_len}\n"
                 f"Δf: {delta_f/1e3:.0f} kHz  |  fs: {fs/1e6:.2f} MHz\n"
                 f"N_used: {N_used} ({N_used*100//Nfft}% de {Nfft})\n"
-                f"Datos: {sc_map['n_data']}  Pilotos: {sc_map['n_pilots']}\n"
+                f"Datos OFDM: {sc_map['n_data']}\n"
+                f"Pilotos: {sc_map['n_pilots']}\n"
                 f"Guarda+DC: {sc_map['n_guard']}\n"
                 f"Bits/símbolo OFDM: {bits_per_ofdm}\n"
                 f"Ejecuciones IFFT: {n_ofdm}\n\n"
+                f"--- SC-FDMA ---\n"
+                f"DFT size: {M_dft} (auto)\n"
+                f"Datos SC-FDMA: {M_dft}\n"
+                f"PAPR máx OFDM: {np.max(papr_list):.2f} dB\n"
+                f"PAPR máx SC-FDMA: {np.max(papr_list_sc):.2f} dB\n"
+                f"BER OFDM: {ber_img:.4e}\n"
+                f"BER SC-FDMA: {ber_img_sc:.4e}\n\n"
                 f"--- IMAGEN ({mod_name}) ---\n"
                 f"Tamaño: {w_px}×{h_px} px\n"
-                f"Bits: {n_bits}  |  Pad: {pad_bits}\n"
-                f"Símbolos QAM: {len(symbols_tx)}\n"
-                f"PAPR máx: {np.max(papr_list):.2f} dB\n"
-                f"BER imagen: {ber_img:.4e}\n"
-                f"PSNR: {psnr:.2f} dB\n\n"
+                f"Bits: {n_bits}  |  PSNR: {psnr:.2f} dB\n\n"
                 f"--- CANAL ---\n"
                 f"{chan_class['freq_type']}\n"
                 f"{chan_class['time_type']}\n"
@@ -408,6 +459,14 @@ class OFDM_Simulator:
                 "total_bits": n_bits,
                 "mod_selected": mod_name,
                 "chan_class": chan_class,
+                "M_dft": M_dft,
+                "sc_map_sc": sc_map_sc,
+                "tx_signal_sc": tx_signal_sc,
+                "papr_list_sc": papr_list_sc,
+                "ber_data_sc": ber_data_sc,
+                "ccdf_data_sc": ccdf_data_sc,
+                "ber_img_sc": ber_img_sc,
+                "n_ofdm_sc": n_ofdm_sc,
             }
             self.render_plots()
 
@@ -428,6 +487,7 @@ class OFDM_Simulator:
         self._render_tab3(d)
         self._render_tab4(d)
         self._render_tab5(d)
+        self._render_tab6(d)
 
     # --- Tab 1: Imagen TX/RX y constelaciones (modulación seleccionada) ---
 
@@ -617,6 +677,71 @@ class OFDM_Simulator:
         )
 
         self._embed(fig, self.tab5)
+
+
+    # --- Tab 6: OFDM vs SC-FDMA ---
+
+    def _render_tab6(self, d):
+        self._clear_tab(self.tab6)
+        M_dft = d["M_dft"]
+
+        info = (
+            f"  OFDM (IFFT={d['Nfft']})  vs  SC-FDMA (FFT={M_dft} → IFFT={d['Nfft']})  |  "
+            f"Datos OFDM: {d['sc_map']['n_data']}  |  Datos SC-FDMA: {M_dft}  |  "
+            f"Canal: {d['profile']}  |  Vel: {d['velocity']} km/h"
+        )
+        tk.Label(
+            self.tab6, text=info, font=("Consolas", 9, "bold"),
+            bg="#4a235a", fg="white", relief="groove", padx=8, pady=4,
+        ).pack(fill="x", padx=6, pady=(5, 0))
+
+        fig, axes = plt.subplots(3, 2, figsize=(14, 18))
+        fig.suptitle(
+            f"Comparación OFDM vs SC-FDMA  —  DFT={M_dft} (auto), IFFT={d['Nfft']}",
+            fontsize=12, fontweight="bold",
+        )
+        fig.subplots_adjust(
+            left=0.08, right=0.96, top=0.94, bottom=0.04,
+            hspace=0.45, wspace=0.3,
+        )
+
+        # [0,0] y [0,1] Mapas de subportadoras
+        ofdm_utils.plot_comparative_subcarrier_maps(
+            axes[0, 0], axes[0, 1],
+            d["sc_map"], d["sc_map_sc"], d["Nfft"], M_dft,
+        )
+
+        # [1,0] Conteo de subportadoras
+        ofdm_utils.plot_comparative_subcarrier_count(
+            axes[1, 0], d["sc_map"], d["sc_map_sc"], d["Nfft"], M_dft,
+        )
+
+        # [1,1] Ancho de banda
+        ofdm_utils.plot_comparative_bandwidth(
+            axes[1, 1], d["sc_map"], d["sc_map_sc"], d["delta_f"], M_dft,
+        )
+
+        # [2,0] BER comparativo
+        ofdm_utils.plot_comparative_ber(
+            axes[2, 0], d["snr_list"],
+            d["ber_data"], d["ber_data_sc"], MOD_COLORS,
+        )
+
+        # [2,1] Potencia de símbolo OFDM vs SC-FDMA
+        ofdm_utils.plot_comparative_symbol_power(
+            axes[2, 1], d["tx_signal"], d["tx_signal_sc"],
+            d["Nfft"], d["cp_len"],
+        )
+
+        self._embed(fig, self.tab6)
+
+        # Segunda figura: CCDF PAPR comparativa (más grande)
+        fig2, ax_ccdf = plt.subplots(figsize=(10, 5))
+        ofdm_utils.plot_comparative_ccdf(
+            ax_ccdf, d["ccdf_data"], d["ccdf_data_sc"], MOD_COLORS,
+        )
+        fig2.tight_layout()
+        self._embed(fig2, self.tab6)
 
 
 if __name__ == "__main__":
