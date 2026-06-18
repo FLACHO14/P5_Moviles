@@ -61,3 +61,36 @@ def apply_channel(tx_signal, channel_impulse_response, snr_db, velocity_kmh=0, f
     noise_pow = sig_pow / snr_lin
     noise = (np.random.randn(len(y)) + 1j*np.random.randn(len(y))) * np.sqrt(noise_pow/2)
     return y + noise, channel_impulse_response
+
+
+# -------------------------------------------------------------------
+# SIMO: NR antenas de recepción con desvanecimiento independiente
+# -------------------------------------------------------------------
+
+def generate_mimo_channels(NR, profile_name, taps_L=None):
+    """Genera NR realizaciones independientes del canal (baja correlación espacial).
+
+    Cada antena receptora experimenta un desvanecimiento completamente
+    independiente, modelando separación espacial suficiente (>= lambda/2).
+    """
+    return [get_channel_profile(profile_name, taps_L) for _ in range(NR)]
+
+
+def apply_channel_mimo(tx_signal, channels, snr_db, velocity_kmh=0, fs=1.92e6):
+    """Aplica NR canales independientes a la misma señal TX.
+
+    Cada antena recibe: y_r = conv(tx, h_r) + doppler + n_r
+    El ruido es independiente por antena (ruido térmico no correlado).
+    """
+    rx_signals = []
+    for h in channels:
+        y = np.convolve(tx_signal, h, mode='full')[:len(tx_signal)]
+        y = apply_doppler(y, velocity_kmh, fs)
+        sig_pow = np.mean(np.abs(y) ** 2)
+        if sig_pow == 0:
+            sig_pow = 1.0
+        snr_lin = 10 ** (snr_db / 10)
+        noise_pow = sig_pow / snr_lin
+        noise = (np.random.randn(len(y)) + 1j * np.random.randn(len(y))) * np.sqrt(noise_pow / 2)
+        rx_signals.append(y + noise)
+    return rx_signals

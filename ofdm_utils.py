@@ -768,3 +768,241 @@ def plot_comparative_symbol_power(ax, tx_ofdm, tx_scfdma, Nfft, cp_len):
         ymin, ymax = ax.get_ylim()
         ax.text(cp_len / 2, ymax - (ymax - ymin) * 0.05, "CP",
                 ha="center", fontsize=8, color="gray")
+
+
+# ===================================================================
+# Diversidad RX: análisis Monte Carlo y graficación
+# ===================================================================
+
+DIVERSITY_COLORS = {
+    "SISO": "#7f8c8d",
+    "MRC": "#2ecc71",
+    "SC": "#e67e22",
+    "MMSE": "#9b59b6",
+}
+DIVERSITY_MARKERS = {"SISO": "o", "MRC": "s", "SC": "^", "MMSE": "D"}
+
+
+def run_analysis_diversity(
+    bits_tx, Nfft, cp_len, sc_map, pilot_value,
+    chan_profile, taps_L, snr_list, n_mc, velocity_kmh, NR,
+    use_scfdma=False, M_dft=None,
+):
+    """Monte Carlo BER con IC 95% para SISO vs MRC vs SC vs MMSE.
+
+    Todas las técnicas comparten la misma realización de canal en cada
+    iteración para una comparación justa. SISO usa solo la primera antena.
+    Los algoritmos de combinación operan en el dominio de la frecuencia
+    (después de la FFT-N del RX, antes de la IDFT-M de SC-FDMA).
+    """
+    import ofdm_tx
+    import ofdm_channel
+    import ofdm_rx
+
+    if use_scfdma and M_dft:
+        sc_map_eff = build_scfdma_map(sc_map, M_dft)
+        n_data = M_dft
+    else:
+        sc_map_eff = sc_map
+        n_data = sc_map["n_data"]
+
+    mods = {"QPSK": 4, "16QAM": 16, "64QAM": 64}
+    techniques = ["SISO", "MRC", "SC", "MMSE"]
+    results = {t: {} for t in techniques}
+    fs = Nfft * DELTA_F
+
+    for mod_name, M in mods.items():
+        k = int(np.log2(M))
+        bits_per_ofdm = n_data * k
+        pad = (-len(bits_tx)) % bits_per_ofdm
+        bits_in = np.pad(bits_tx, (0, pad)) if pad else bits_tx.copy()
+
+        tech_means = {t: [] for t in techniques}
+        tech_cis = {t: [] for t in techniques}
+
+        for snr_db in snr_list:
+            tech_iters = {t: [] for t in techniques}
+
+            for _ in range(n_mc):
+                s = ofdm_tx.qam_mod(bits_in, M)
+                if use_scfdma and M_dft:
+                    tx, _, _ = ofdm_tx.scfdma_tx_block(
+                        s, Nfft, cp_len, sc_map, pilot_value, M_dft
+                    )
+                else:
+                    tx, _, _ = ofdm_tx.ofdm_tx_block(
+                        s, Nfft, cp_len, sc_map_eff, pilot_value
+                    )
+
+                channels = ofdm_channel.generate_mimo_channels(NR, chan_profile, taps_L)
+                rx_list = ofdm_channel.apply_channel_mimo(
+                    tx, channels, snr_db, velocity_kmh, fs
+                )
+
+                Y_list = [ofdm_rx.ofdm_rx_block(r, Nfft, cp_len) for r in rx_list]
+                H_all = [
+                    ofdm_rx.estimate_channel_from_pilots(Y, sc_map_eff, pilot_value, Nfft)
+                    for Y in Y_list
+                ]
+
+                combos = {}
+                siso_eq, _ = ofdm_rx.equalize_with_pilots(
+                    Y_list[0], sc_map_eff, pilot_value, Nfft
+                )
+                combos["SISO"] = siso_eq
+                combos["MRC"], _ = ofdm_rx.combine_mrc(Y_list, H_all, sc_map_eff)
+                combos["SC"] = ofdm_rx.combine_sc(Y_list, H_all, sc_map_eff)
+                combos["MMSE"] = ofdm_rx.combine_mmse(
+                    Y_list, H_all, sc_map_eff, snr_db
+                )
+
+                for t in techniques:
+                    Xhat = combos[t]
+                    if use_scfdma and M_dft:
+                        Xhat = ofdm_rx.scfdma_despread(Xhat, M_dft)
+                    bh = ofdm_rx.qam_demod(Xhat, M)[: len(bits_in)]
+                    if len(bh) < len(bits_in):
+                        bh = np.pad(bh, (0, len(bits_in) - len(bh)))
+                    tech_iters[t].append(np.mean(bh != bits_in))
+
+            for t in techniques:
+                m = np.mean(tech_iters[t])
+                s = np.std(tech_iters[t], ddof=1) if n_mc > 1 else 0
+                tech_means[t].append(m)
+                tech_cis[t].append(1.96 * s / np.sqrt(n_mc))
+
+        for t in techniques:
+            results[t][mod_name] = {"mean": tech_means[t], "ci": tech_cis[t]}
+
+    return results
+
+
+def generate_diversity_power_data(
+    Nfft, cp_len, sc_map, pilot_value, chan_profile, taps_L,
+    snr_db, velocity_kmh, NR, M_mod=16,
+    use_scfdma=False, M_dft=None,
+):
+    """Genera datos de potencia de canal para visualizar ganancia de diversidad.
+
+    Retorna |H_1[k]|² (una antena) y sum_r|H_r[k]|² (NR antenas combinadas)
+    sobre todas las subportadoras, mostrando cómo MRC suaviza los deep fades.
+    """
+    import ofdm_tx
+    import ofdm_channel
+    import ofdm_rx
+
+    if use_scfdma and M_dft:
+        sc_map_eff = build_scfdma_map(sc_map, M_dft)
+        n_data = M_dft
+    else:
+        sc_map_eff = sc_map
+        n_data = sc_map["n_data"]
+
+    k = int(np.log2(M_mod))
+    fs = Nfft * DELTA_F
+    bits = np.random.randint(0, 2, 10 * n_data * k).astype(np.uint8)
+    syms = ofdm_tx.qam_mod(bits, M_mod)
+
+    if use_scfdma and M_dft:
+        tx, _, _ = ofdm_tx.scfdma_tx_block(syms, Nfft, cp_len, sc_map, pilot_value, M_dft)
+    else:
+        tx, _, _ = ofdm_tx.ofdm_tx_block(syms, Nfft, cp_len, sc_map_eff, pilot_value)
+
+    channels = ofdm_channel.generate_mimo_channels(NR, chan_profile, taps_L)
+    rx_list = ofdm_channel.apply_channel_mimo(tx, channels, snr_db, velocity_kmh, fs)
+
+    Y_list = [ofdm_rx.ofdm_rx_block(r, Nfft, cp_len) for r in rx_list]
+    H_all = [
+        ofdm_rx.estimate_channel_from_pilots(Y, sc_map_eff, pilot_value, Nfft)
+        for Y in Y_list
+    ]
+
+    H_single = np.abs(H_all[0][0]) ** 2
+    H_combined = sum(np.abs(H_all[r][0]) ** 2 for r in range(NR))
+
+    return H_single, H_combined
+
+
+def plot_diversity_ber(ax, snr_list, div_results, mod_name, NR):
+    """BER vs SNR para SISO vs MRC vs SC vs MMSE con IC 95%."""
+    snr_arr = np.array(snr_list)
+    for tech in ["SISO", "MRC", "SC", "MMSE"]:
+        if mod_name not in div_results[tech]:
+            continue
+        means = np.array(div_results[tech][mod_name]["mean"])
+        cis = np.array(div_results[tech][mod_name]["ci"])
+        color = DIVERSITY_COLORS[tech]
+        marker = DIVERSITY_MARKERS[tech]
+        mask = means > 0
+        label = f"{tech}" if tech == "SISO" else f"{tech} (NR={NR})"
+        if np.any(mask):
+            ax.semilogy(
+                snr_arr[mask], means[mask],
+                marker=marker, color=color, label=label, markersize=5,
+            )
+            upper = means[mask] + cis[mask]
+            lower = np.maximum(means[mask] - cis[mask], 1e-10)
+            ax.fill_between(snr_arr[mask], lower, upper, alpha=0.15, color=color)
+        else:
+            ax.semilogy([], [], marker=marker, color=color, label=f"{label} (BER=0)")
+
+    ax.set_title(f"{mod_name} — BER vs SNR + IC 95%")
+    ax.set_xlabel("SNR (dB)")
+    ax.set_ylabel("BER")
+    ax.legend(fontsize=7)
+    ax.grid(True, which="both", alpha=0.3)
+
+
+def plot_diversity_power_stability(ax, H_single, H_combined, Nfft, NR):
+    """Potencia del canal |H|² por subportadora: 1 antena vs NR combinadas.
+
+    Demuestra cómo la diversidad suaviza los deep fades del canal.
+    Solo muestra subportadoras activas (excluye banda de guarda y DC nulo).
+    """
+    active = np.where((H_single > 1e-10) & (H_combined > 1e-10))[0]
+    if len(active) == 0:
+        ax.text(0.5, 0.5, "Sin datos activos", ha="center", va="center",
+                transform=ax.transAxes)
+        return
+
+    sc_centered = active - Nfft // 2
+    H1_dB = 10 * np.log10(H_single[active] + 1e-20)
+    Hc_dB = 10 * np.log10(H_combined[active] + 1e-20)
+
+    from scipy.ndimage import uniform_filter1d
+    win = max(3, len(active) // 80)
+    H1_smooth = uniform_filter1d(H1_dB, size=win)
+    Hc_smooth = uniform_filter1d(Hc_dB, size=win)
+
+    ax.fill_between(sc_centered, H1_smooth, alpha=0.15, color="#e74c3c")
+    ax.plot(sc_centered, H1_smooth, color="#e74c3c", alpha=0.8, linewidth=0.9,
+            label="1 antena (SISO)")
+    ax.fill_between(sc_centered, Hc_smooth, alpha=0.15, color="#2ecc71")
+    ax.plot(sc_centered, Hc_smooth, color="#2ecc71", alpha=0.9, linewidth=1.3,
+            label=f"MRC combinado (NR={NR})")
+
+    mean1 = np.mean(H1_dB)
+    meanc = np.mean(Hc_dB)
+    ax.axhline(mean1, color="#e74c3c", linestyle="--", alpha=0.5, linewidth=0.8)
+    ax.axhline(meanc, color="#2ecc71", linestyle="--", alpha=0.5, linewidth=0.8)
+
+    gain = meanc - mean1
+    var_single = np.std(H1_dB)
+    var_combined = np.std(Hc_dB)
+    ax.annotate(
+        f"Ganancia diversidad: {gain:.1f} dB\n"
+        f"Var SISO: {var_single:.1f} dB  |  Var MRC: {var_combined:.1f} dB",
+        xy=(0.02, 0.98), xycoords="axes fraction",
+        ha="left", va="top", fontsize=8,
+        bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.9),
+    )
+
+    y_min = max(np.min(H1_smooth) - 3, -30)
+    y_max = np.max(Hc_smooth) + 3
+    ax.set_ylim(y_min, y_max)
+
+    ax.set_title(f"Ganancia de Diversidad vs Fading (NR={NR})")
+    ax.set_xlabel("Subportadora (centrada en DC)")
+    ax.set_ylabel("|H|² (dB)")
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(True, alpha=0.3)

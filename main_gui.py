@@ -62,6 +62,7 @@ class OFDM_Simulator:
         self.mc_var = tk.StringVar(value="10")
         self.taps_var = tk.StringVar(value="8")
         self.max_side_var = tk.StringVar(value="128")
+        self.nr_ant_var = tk.StringVar(value="2")
 
         self.snr_list = [0, 5, 10, 15, 20]
         self.sim_data = {}
@@ -92,6 +93,7 @@ class OFDM_Simulator:
         self._combo(ctrl_frame, "Prefijo Cíclico:", self.cp_var, ["Normal", "Extendido"])
         self._row(ctrl_frame, "Taps canal (L):", self.taps_var)
         self._row(ctrl_frame, "Espac. pilotos:", self.pilot_spacing_var)
+        self._combo(ctrl_frame, "NR Antenas:", self.nr_ant_var, ["1", "2", "3", "4"])
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
 
@@ -155,6 +157,8 @@ class OFDM_Simulator:
         self.notebook.add(self.tab5, text="5. BER y PAPR")
         self.tab6 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab6, text="6. OFDM vs SC-FDMA")
+        self.tab7 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab7, text="7. Diversidad RX")
 
     # helpers para layout compacto
     def _row(self, parent, label, var):
@@ -401,6 +405,22 @@ class OFDM_Simulator:
                 profile, taps_L, self.snr_list, n_mc, velocity, M_dft,
             )
 
+            # -- Diversidad RX --
+            NR = max(1, int(self.nr_ant_var.get()))
+            self._status("Monte Carlo Diversidad RX...\n(SISO vs MRC vs SC vs MMSE)")
+            div_results = ofdm_utils.run_analysis_diversity(
+                bits_tx, Nfft, cp_len, sc_map, pilot_value,
+                profile, taps_L, self.snr_list, n_mc, velocity, NR,
+                use_scfdma=True, M_dft=M_dft,
+            )
+
+            self._status("Generando datos de potencia diversidad...")
+            H_single, H_combined = ofdm_utils.generate_diversity_power_data(
+                Nfft, cp_len, sc_map, pilot_value, profile, taps_L,
+                snr_sim, velocity, NR, M_mod=M,
+                use_scfdma=True, M_dft=M_dft,
+            )
+
             # -- Reporte --
             h_px, w_px = img_arr.shape
             report = (
@@ -425,7 +445,10 @@ class OFDM_Simulator:
                 f"Bits: {n_bits}  |  PSNR: {psnr:.2f} dB\n\n"
                 f"--- CANAL ---\n"
                 f"{chan_class['freq_type']}\n"
-                f"{chan_class['time_type']}\n"
+                f"{chan_class['time_type']}\n\n"
+                f"--- DIVERSIDAD RX ---\n"
+                f"Antenas RX (NR): {NR}\n"
+                f"Técnicas: SISO, MRC, SC, MMSE\n"
             )
             self._status(report)
 
@@ -467,6 +490,10 @@ class OFDM_Simulator:
                 "ccdf_data_sc": ccdf_data_sc,
                 "ber_img_sc": ber_img_sc,
                 "n_ofdm_sc": n_ofdm_sc,
+                "NR": NR,
+                "div_results": div_results,
+                "H_single": H_single,
+                "H_combined": H_combined,
             }
             self.render_plots()
 
@@ -488,6 +515,7 @@ class OFDM_Simulator:
         self._render_tab4(d)
         self._render_tab5(d)
         self._render_tab6(d)
+        self._render_tab7(d)
 
     # --- Tab 1: Imagen TX/RX y constelaciones (modulación seleccionada) ---
 
@@ -788,6 +816,56 @@ class OFDM_Simulator:
         )
         fig2.tight_layout()
         self._embed(fig2, self.tab6)
+
+
+    # --- Tab 7: Diversidad RX ---
+
+    def _render_tab7(self, d):
+        self._clear_tab(self.tab7)
+        NR = d["NR"]
+
+        info = (
+            f"  Diversidad RX  |  NR={NR} antenas  |  "
+            f"Técnicas: SISO vs MRC vs SC vs MMSE  |  "
+            f"Canal: {d['profile']}  |  Vel: {d['velocity']} km/h  |  "
+            f"SC-FDMA (DFT={d['M_dft']})"
+        )
+        tk.Label(
+            self.tab7, text=info, font=("Consolas", 9, "bold"),
+            bg="#1a5276", fg="white", relief="groove", padx=8, pady=4,
+        ).pack(fill="x", padx=6, pady=(5, 0))
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 14))
+        fig.suptitle(
+            f"Diversidad en Recepción — NR={NR} antenas, SC-FDMA",
+            fontsize=12, fontweight="bold",
+        )
+        fig.subplots_adjust(
+            left=0.08, right=0.96, top=0.93, bottom=0.06,
+            hspace=0.35, wspace=0.28,
+        )
+
+        # [0,0] BER QPSK
+        ofdm_utils.plot_diversity_ber(
+            axes[0, 0], d["snr_list"], d["div_results"], "QPSK", NR
+        )
+
+        # [0,1] BER 16QAM
+        ofdm_utils.plot_diversity_ber(
+            axes[0, 1], d["snr_list"], d["div_results"], "16QAM", NR
+        )
+
+        # [1,0] BER 64QAM
+        ofdm_utils.plot_diversity_ber(
+            axes[1, 0], d["snr_list"], d["div_results"], "64QAM", NR
+        )
+
+        # [1,1] Ganancia de diversidad vs fading
+        ofdm_utils.plot_diversity_power_stability(
+            axes[1, 1], d["H_single"], d["H_combined"], d["Nfft"], NR
+        )
+
+        self._embed(fig, self.tab7)
 
 
 if __name__ == "__main__":

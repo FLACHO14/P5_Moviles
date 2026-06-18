@@ -171,6 +171,133 @@ def qam_demod(symbols, M):
     return np.concatenate([bi, bq], axis=1).reshape(-1).astype(np.uint8)
 
 
+# -------------------------------------------------------------------
+# Diversidad RX: estimación de canal y algoritmos de combinación
+# -------------------------------------------------------------------
+
+def estimate_channel_from_pilots(Y_frames, sc_map, pilot_value, Nfft):
+    """Estima el canal H por símbolo OFDM usando subportadoras piloto.
+
+    Misma lógica que equalize_with_pilots pero retorna solo las
+    estimaciones de canal, sin ecualizar. Se usa cuando la ecualización
+    la realiza un combinador de diversidad externo.
+    """
+    n_frames = Y_frames.shape[0]
+    pilot_idx = sc_map["pilot_indices"]
+    sort_order = np.argsort(pilot_idx)
+    p_sorted = pilot_idx[sort_order]
+    all_idx = np.arange(Nfft)
+    H_estimates = []
+
+    for i in range(n_frames):
+        H_pilots = Y_frames[i][pilot_idx] / pilot_value
+        H_sorted = H_pilots[sort_order]
+        f_re = interp1d(
+            p_sorted, np.real(H_sorted),
+            kind="linear", fill_value="extrapolate", bounds_error=False,
+        )
+        f_im = interp1d(
+            p_sorted, np.imag(H_sorted),
+            kind="linear", fill_value="extrapolate", bounds_error=False,
+        )
+        H_estimates.append(f_re(all_idx) + 1j * f_im(all_idx))
+
+    return H_estimates
+
+
+def combine_mrc(Y_frames_list, H_est_all, sc_map):
+    """Maximum-Ratio Combining en el dominio de la frecuencia.
+
+    Para cada subportadora k, símbolo OFDM i:
+      X_hat[k] = sum_r( H_r*[k] · Y_r[k] ) / sum_r( |H_r[k]|² )
+
+    Alinea fases y pondera por ganancia de canal → maximiza SNR combinada.
+    Los pesos se aplican ANTES de la de-precodificación (IDFT de tamaño M).
+    """
+    NR = len(Y_frames_list)
+    n_frames = Y_frames_list[0].shape[0]
+    Nfft = Y_frames_list[0].shape[1]
+    data_idx = sc_map["data_indices"]
+    n_data = len(data_idx)
+
+    all_data = np.zeros(n_frames * n_data, dtype=complex)
+    H_combined_power = []
+
+    for i in range(n_frames):
+        num = np.zeros(Nfft, dtype=complex)
+        den = np.zeros(Nfft, dtype=float)
+        for r in range(NR):
+            H = H_est_all[r][i]
+            Y = Y_frames_list[r][i]
+            num += np.conj(H) * Y
+            den += np.abs(H) ** 2
+        den = np.maximum(den, 1e-12)
+        X_hat = num / den
+        H_combined_power.append(den)
+        all_data[i * n_data : (i + 1) * n_data] = X_hat[data_idx]
+
+    return all_data, H_combined_power
+
+
+def combine_sc(Y_frames_list, H_est_all, sc_map):
+    """Selection Combining: selecciona la antena con mayor |H|² por subportadora.
+
+    Para cada subportadora k:
+      r* = argmax_r |H_r[k]|²
+      X_hat[k] = Y_{r*}[k] / H_{r*}[k]
+    """
+    NR = len(Y_frames_list)
+    n_frames = Y_frames_list[0].shape[0]
+    Nfft = Y_frames_list[0].shape[1]
+    data_idx = sc_map["data_indices"]
+    n_data = len(data_idx)
+
+    all_data = np.zeros(n_frames * n_data, dtype=complex)
+
+    for i in range(n_frames):
+        H_stack = np.array([H_est_all[r][i] for r in range(NR)])
+        Y_stack = np.array([Y_frames_list[r][i] for r in range(NR)])
+        best = np.argmax(np.abs(H_stack) ** 2, axis=0)
+        k_idx = np.arange(Nfft)
+        X_hat = Y_stack[best, k_idx] / (H_stack[best, k_idx] + 1e-12)
+        all_data[i * n_data : (i + 1) * n_data] = X_hat[data_idx]
+
+    return all_data
+
+
+def combine_mmse(Y_frames_list, H_est_all, sc_map, snr_db):
+    """MMSE Combining: minimiza el error cuadrático medio.
+
+    Para SIMO (1 TX, NR RX):
+      X_hat[k] = sum_r(H_r*[k]·Y_r[k]) / (sum_r(|H_r[k]|²) + σ²_n)
+
+    Similar a MRC pero con regularización por ruido, lo que evita
+    amplificar el ruido en subportadoras con canal débil.
+    """
+    NR = len(Y_frames_list)
+    n_frames = Y_frames_list[0].shape[0]
+    Nfft = Y_frames_list[0].shape[1]
+    data_idx = sc_map["data_indices"]
+    n_data = len(data_idx)
+
+    noise_var = 1.0 / (10 ** (snr_db / 10)) if snr_db > -30 else 1e3
+
+    all_data = np.zeros(n_frames * n_data, dtype=complex)
+
+    for i in range(n_frames):
+        num = np.zeros(Nfft, dtype=complex)
+        den = np.zeros(Nfft, dtype=float)
+        for r in range(NR):
+            H = H_est_all[r][i]
+            Y = Y_frames_list[r][i]
+            num += np.conj(H) * Y
+            den += np.abs(H) ** 2
+        X_hat = num / np.maximum(den + noise_var, 1e-12)
+        all_data[i * n_data : (i + 1) * n_data] = X_hat[data_idx]
+
+    return all_data
+
+
 def scfdma_despread(eq_symbols, M_dft):
     """IDFT de-spreading para SC-FDMA: deshace el DFT precoding del TX."""
     n_total = len(eq_symbols)
