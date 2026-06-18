@@ -1,19 +1,16 @@
 # main_gui.py
 # Interfaz gráfica del Simulador OFDM 4G LTE.
-# Orquesta la simulación completa: carga de imagen → TX → canal → RX → análisis.
 #
-# Cambios respecto a la versión anterior:
-# - Panel lateral renombrado a "Configuración de Parámetros".
-# - Slider de SNR reemplazado por lista editable: el usuario añade múltiples valores
-#   y el mayor se usa para la transmisión de imagen; todos los valores se usan para
-#   calcular la curva BER vs SNR.
-# - Nuevos campos: Taps del Canal (L) e Iteraciones Monte Carlo.
-# - Tab 1: etiqueta con conteo de bits/símbolos y diagramas de constelación TX/RX.
-# - Tab 3: gráfica renombrada a "Respuesta en Frecuencia del Canal".
-# - Tab 4: renombrada a "Analisis" con CCDF del PAPR y curva BER vs SNR.
-# - Cadena RX corregida: anteriormente se simulaba el error con XOR aleatorio
-#   (lo que producía ~60% BER sin importar el SNR); ahora se usa la cadena real
-#   ofdm_rx_block → equalize → qam_demod.
+# Cambios principales respecto a la versión V2:
+# - Cadena TX/RX con pilotos: insert_pilots en TX, equalize_with_pilots en RX.
+# - Banda de guarda del 10%: solo el 90% del BW se usa (build_subcarrier_map).
+# - Tab 1: muestra solo la modulación seleccionada (no las tres a la vez).
+# - Tab 2: mapa de subportadoras (datos/pilotos/guarda) + ortogonalidad + PSD.
+# - Tab 3: respuesta del canal + clasificación (selectivo/plano, rápido/lento).
+# - Tab 5: BER con IC 95%, comparación con/sin pilotos, CCDF PAPR,
+#           potencia instantánea vs promedio (PAPR en tiempo).
+# - Nuevos controles: Δf editable, espaciado de pilotos.
+# - Panel de reporte con estadísticas del sistema.
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -36,180 +33,151 @@ VEL_MAP = {
     "Urbano (50 km/h)": 50,
     "Autopista (120 km/h)": 120,
 }
+CHAN_MODELS = [
+    "Ideal",
+    "Rayleigh (NLoS)",
+    "Rician (LoS)",
+    "Suburbano (EPA)",
+    "Urbano (EVA)",
+    "Rural (ETU)",
+]
 
 
 class OFDM_Simulator:
     def __init__(self, root):
         self.root = root
-        self.root.title("Simulador OFDM 4G LTE - Ingeniería")
-        self.root.geometry("1400x900")
+        self.root.title("Simulador OFDM 4G LTE")
+        self.root.geometry("1600x1000")
 
+        # Variables de control
         self.img_path = tk.StringVar()
         self.mod_var = tk.StringVar(value="16QAM")
-        self.chan_var = tk.StringVar(value="Rayleigh (NLoS)")
-        self.vel_var = tk.StringVar(value="Pedestre (3 km/h)")
+        self.chan_profile = tk.StringVar(value="Rayleigh (NLoS)")
+        self.vel_var = tk.StringVar(value="Urbano (50 km/h)")
         self.cp_var = tk.StringVar(value="Normal")
-        self.bw_var = tk.DoubleVar(value=10.0)
+        self.bw_var = tk.StringVar(value="10.0")
+        self.delta_f_var = tk.StringVar(value="15000")
+        self.pilot_spacing_var = tk.StringVar(value="6")
         self.snr_entry_var = tk.StringVar(value="20")
-        self.mc_var = tk.StringVar(value="5")
+        self.mc_var = tk.StringVar(value="10")
         self.taps_var = tk.StringVar(value="8")
-        # Lado máximo de la imagen: la imagen se escala proporcionalmente para que
-        # ningún lado supere este valor (sin distorsionar el aspecto original).
         self.max_side_var = tk.StringVar(value="128")
+        self.nr_ant_var = tk.StringVar(value="2")
 
-        # Lista de valores SNR precargada; el máximo se usa para la simulación de imagen
         self.snr_list = [0, 5, 10, 15, 20]
         self.sim_data = {}
 
         self.setup_ui()
         self._refresh_snr_listbox()
 
-    # ------------------------------------------------------------------
-    # UI setup
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # UI
+    # ==============================================================
 
     def setup_ui(self):
+        # --- Panel lateral de controles ---
         ctrl_frame = ttk.LabelFrame(self.root, text=" Configuración de Parámetros ")
-        ctrl_frame.pack(side="left", fill="y", padx=10, pady=10)
+        ctrl_frame.pack(side="left", fill="y", padx=8, pady=8)
 
         tk.Button(
-            ctrl_frame,
-            text="CARGAR IMAGEN",
-            command=self.load_image,
-            bg="#34495e",
-            fg="black",
-            font=("Helvetica", 10, "bold"),
-        ).pack(pady=10, fill="x")
+            ctrl_frame, text="CARGAR IMAGEN", command=self.load_image,
+            bg="#34495e", fg="white", font=("Helvetica", 10, "bold"),
+        ).pack(pady=(8, 4), fill="x", padx=5)
 
-        ttk.Label(ctrl_frame, text="Lado máx. imagen (px):").pack()
-        tk.Spinbox(
-            ctrl_frame,
-            textvariable=self.max_side_var,
-            from_=8, to=1024, increment=8,
-            width=8, font=("Consolas", 9),
-        ).pack(pady=3)
+        self._row(ctrl_frame, "Lado máx. (px):", self.max_side_var)
+        self._row(ctrl_frame, "BW (MHz):", self.bw_var)
+        self._row(ctrl_frame, "Δf (Hz):", self.delta_f_var)
+        self._combo(ctrl_frame, "Modulación:", self.mod_var, list(MOD_MAP.keys()))
+        self._combo(ctrl_frame, "Canal:", self.chan_profile, CHAN_MODELS)
+        self._combo(ctrl_frame, "Velocidad:", self.vel_var, list(VEL_MAP.keys()))
+        self._combo(ctrl_frame, "Prefijo Cíclico:", self.cp_var, ["Normal", "Extendido"])
+        self._row(ctrl_frame, "Taps canal (L):", self.taps_var)
+        self._row(ctrl_frame, "Espac. pilotos:", self.pilot_spacing_var)
+        self._combo(ctrl_frame, "NR Antenas:", self.nr_ant_var, ["1", "2", "3", "4"])
 
-        ttk.Label(ctrl_frame, text="Ancho de Banda (MHz):").pack()
-        ttk.Entry(ctrl_frame, textvariable=self.bw_var).pack(pady=3, fill="x", padx=5)
-
-        ttk.Label(ctrl_frame, text="Esquema de Modulación:").pack()
-        ttk.Combobox(
-            ctrl_frame, textvariable=self.mod_var, values=["QPSK", "16QAM", "64QAM"]
-        ).pack(pady=3, fill="x", padx=5)
-
-        ttk.Label(ctrl_frame, text="Modelo de Canal:").pack()
-        ttk.Combobox(
-            ctrl_frame,
-            textvariable=self.chan_var,
-            values=["Ideal", "Rayleigh (NLoS)", "Rician (LoS)"],
-        ).pack(pady=3, fill="x", padx=5)
-
-        ttk.Label(ctrl_frame, text="Ambiente / Velocidad:").pack()
-        ttk.Combobox(
-            ctrl_frame,
-            textvariable=self.vel_var,
-            values=list(VEL_MAP.keys()),
-        ).pack(pady=3, fill="x", padx=5)
-
-        ttk.Label(ctrl_frame, text="Tipo de Prefijo Cíclico:").pack()
-        ttk.Combobox(
-            ctrl_frame, textvariable=self.cp_var, values=["Normal", "Extendido"]
-        ).pack(pady=3, fill="x", padx=5)
-
-        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=6)
+        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
 
         # --- Lista de valores SNR ---
-        # El usuario añade cada valor que desee; todos se usan en la curva BER.
-        # El valor máximo de la lista se aplica a la transmisión de imagen.
-        ttk.Label(
-            ctrl_frame, text="Valores SNR (dB):", font=("Helvetica", 9, "bold")
-        ).pack()
-        snr_add_frame = ttk.Frame(ctrl_frame)
-        snr_add_frame.pack(fill="x", padx=5, pady=2)
-        ttk.Entry(snr_add_frame, textvariable=self.snr_entry_var, width=8).pack(
+        ttk.Label(ctrl_frame, text="Valores SNR (dB):", font=("Helvetica", 9, "bold")).pack(
+            padx=5, anchor="w"
+        )
+        snr_row = ttk.Frame(ctrl_frame)
+        snr_row.pack(fill="x", padx=5, pady=2)
+        ttk.Entry(snr_row, textvariable=self.snr_entry_var, width=8).pack(
             side="left", padx=(0, 4)
         )
         tk.Button(
-            snr_add_frame,
-            text="Añadir",
-            command=self.add_snr,
-            bg="#2980b9",
-            fg="black",
-            font=("Helvetica", 8, "bold"),
+            snr_row, text="Añadir", command=self.add_snr, bg="#2980b9", fg="white",
         ).pack(side="left")
 
-        self.snr_listbox = tk.Listbox(
-            ctrl_frame, height=5, width=30, font=("Consolas", 9)
-        )
+        self.snr_listbox = tk.Listbox(ctrl_frame, height=4, font=("Consolas", 9))
         self.snr_listbox.pack(pady=2, padx=5, fill="x")
 
-        snr_btn_frame = ttk.Frame(ctrl_frame)
-        snr_btn_frame.pack(fill="x", padx=5)
-        tk.Button(
-            snr_btn_frame,
-            text="Eliminar",
-            command=self.remove_snr,
-            bg="#c0392b",
-            fg="black",
-            font=("Helvetica", 8, "bold"),
-        ).pack(side="left", padx=(0, 3))
-        tk.Button(
-            snr_btn_frame,
-            text="Limpiar",
-            command=self.clear_snr,
-            bg="#7f8c8d",
-            fg="black",
-            font=("Helvetica", 8, "bold"),
-        ).pack(side="left")
-
-        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=6)
-
-        # --- Parámetros de análisis Monte Carlo ---
-        ttk.Label(ctrl_frame, text="Taps del Canal (L):").pack()
-        ttk.Entry(ctrl_frame, textvariable=self.taps_var).pack(
-            pady=3, fill="x", padx=5
+        btn_snr = ttk.Frame(ctrl_frame)
+        btn_snr.pack(fill="x", padx=5)
+        tk.Button(btn_snr, text="Eliminar", command=self.remove_snr, bg="#c0392b", fg="white").pack(
+            side="left", padx=(0, 3)
+        )
+        tk.Button(btn_snr, text="Limpiar", command=self.clear_snr, bg="#7f8c8d", fg="white").pack(
+            side="left"
         )
 
-        ttk.Label(ctrl_frame, text="Iteraciones Monte Carlo:").pack()
-        ttk.Entry(ctrl_frame, textvariable=self.mc_var).pack(pady=3, fill="x", padx=5)
+        self._row(ctrl_frame, "Iteraciones MC:", self.mc_var)
 
-        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=6)
+        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
 
         tk.Button(
-            ctrl_frame,
-            text="EJECUTAR TRANSMISIÓN",
-            command=self.run_simulation,
-            bg="#27ae60",
-            fg="black",
-            font=("Helvetica", 12, "bold"),
-            height=2,
-        ).pack(pady=10, fill="x")
+            ctrl_frame, text="EJECUTAR TRANSMISIÓN", command=self.run_simulation,
+            bg="#27ae60", fg="white", font=("Helvetica", 11, "bold"), height=2,
+        ).pack(pady=6, fill="x", padx=5)
 
-        ttk.Label(ctrl_frame, text="Datos del Sistema:", font=("Helvetica", 9, "bold")).pack()
+        # Reporte
+        ttk.Label(ctrl_frame, text="Datos del Sistema:", font=("Helvetica", 9, "bold")).pack(
+            padx=5, anchor="w"
+        )
         self.txt_report = tk.Text(
-            ctrl_frame, width=32, height=14, font=("Consolas", 8), bg="#121313"
+            ctrl_frame, width=32, height=14, font=("Consolas", 8),
+            bg="#1a1a2e", fg="#e0e0e0",
         )
-        self.txt_report.pack(pady=4, padx=4)
+        self.txt_report.pack(pady=4, padx=5, fill="x")
 
         # --- Pestañas de resultados ---
         self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(side="right", expand=True, fill="both", padx=10, pady=10)
+        self.notebook.pack(side="right", expand=True, fill="both", padx=8, pady=8)
 
         self.tab1 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab1, text="Comparativa de Imagen")
+        self.notebook.add(self.tab1, text="1. Imagen y Constelaciones")
         self.tab2 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab2, text="Análisis de Subportadoras")
+        self.notebook.add(self.tab2, text="2. Subportadoras")
         self.tab3 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab3, text="Canal y Prefijo")
+        self.notebook.add(self.tab3, text="3. Canal")
         self.tab4 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab4, text="Analisis")
+        self.notebook.add(self.tab4, text="4. Prefijo Cíclico")
+        self.tab5 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab5, text="5. BER y PAPR")
+        self.tab6 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab6, text="6. OFDM vs SC-FDMA")
+        self.tab7 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab7, text="7. Diversidad RX")
 
-    # ------------------------------------------------------------------
-    # SNR list helpers
-    # ------------------------------------------------------------------
+    # helpers para layout compacto
+    def _row(self, parent, label, var):
+        f = ttk.Frame(parent)
+        f.pack(fill="x", padx=5, pady=1)
+        ttk.Label(f, text=label).pack(side="left")
+        ttk.Entry(f, textvariable=var, width=10).pack(side="right")
+
+    def _combo(self, parent, label, var, values):
+        f = ttk.Frame(parent)
+        f.pack(fill="x", padx=5, pady=1)
+        ttk.Label(f, text=label).pack(side="left")
+        ttk.Combobox(f, textvariable=var, values=values, width=18).pack(side="right")
+
+    # ==============================================================
+    # Helpers
+    # ==============================================================
 
     def add_snr(self):
-        """Agrega un valor SNR a la lista (sin duplicados, mantiene orden ascendente)."""
         try:
             val = float(self.snr_entry_var.get())
             if val not in self.snr_list:
@@ -234,10 +202,6 @@ class OFDM_Simulator:
         for v in self.snr_list:
             self.snr_listbox.insert(tk.END, f"  {v:g} dB")
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     def load_image(self):
         path = filedialog.askopenfilename(
             filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")]
@@ -245,9 +209,8 @@ class OFDM_Simulator:
         if path:
             self.img_path.set(path)
 
-    def _psnr(self, original, decoded):
-        """PSNR simplificado (Peak Signal-to-Noise Ratio) para evaluar calidad de imagen."""
-        mse = np.mean((original.astype(float) - decoded.astype(float)) ** 2)
+    def _psnr(self, orig, dec):
+        mse = np.mean((orig.astype(float) - dec.astype(float)) ** 2)
         if mse == 0:
             return 100.0
         return 20 * np.log10(255.0 / np.sqrt(mse))
@@ -257,26 +220,32 @@ class OFDM_Simulator:
             w.destroy()
 
     def _status(self, msg):
-        """Actualiza el cuadro de reporte y fuerza el redibujado de la ventana."""
         self.txt_report.delete(1.0, tk.END)
         self.txt_report.insert(tk.END, msg)
         self.root.update()
 
-    # ------------------------------------------------------------------
-    # Simulation
-    # ------------------------------------------------------------------
+    def _embed(self, fig, tab):
+        canvas = FigureCanvasTkAgg(fig, master=tab)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        plt.close(fig)
+
+    # ==============================================================
+    # Simulación
+    # ==============================================================
 
     def run_simulation(self):
-        """Ejecuta la cadena completa TX → Canal → RX → Análisis → Gráficas.
+        """Cadena completa TX → Canal → RX → Análisis Monte Carlo → Gráficas.
 
         Flujo:
-        1. Carga imagen y la serializa en bits.
-        2. Modula con QAM y genera señal OFDM (IFFT + CP).
-        3. Aplica el canal seleccionado al SNR máximo de la lista.
-        4. Demodula: elimina CP → FFT → ecualización → QAM demod.
-        5. Reconstruye la imagen y calcula PSNR.
-        6. Ejecuta análisis Monte Carlo (BER + CCDF PAPR) para todos los SNR.
-        7. Renderiza las cuatro pestañas.
+        1. Calcula parámetros OFDM (Nfft, CP, mapa de subportadoras).
+        2. Carga imagen y la serializa en bits.
+        3. TX: modulación QAM + inserción de pilotos + IFFT + CP.
+        4. Canal: convolución con h + Doppler + AWGN.
+        5. RX: elimina CP + FFT + ecualización por pilotos + demod QAM.
+        6. Reconstruye la imagen y calcula BER / PSNR.
+        7. Monte Carlo: BER con IC 95% para las 3 modulaciones.
+        8. Renderiza las 5 pestañas.
         """
         if not self.img_path.get():
             messagebox.showwarning("Imagen", "Cargue una imagen primero.")
@@ -286,18 +255,24 @@ class OFDM_Simulator:
             return
 
         try:
-            M = MOD_MAP[self.mod_var.get()]
-            Nfft, cp_len = ofdm_utils.get_nfft_cp(self.bw_var.get(), self.cp_var.get())
+            # -- Parámetros --
+            bw = float(self.bw_var.get())
+            cp_mode = self.cp_var.get()
+            delta_f = max(1000, float(self.delta_f_var.get()))
+            pilot_spacing = max(2, int(self.pilot_spacing_var.get()))
+
+            Nfft, cp_len, N_used = ofdm_utils.get_nfft_cp(bw, cp_mode, delta_f)
+            sc_map = ofdm_utils.build_subcarrier_map(Nfft, N_used, pilot_spacing)
+            pilot_value = ofdm_params.PILOT_AMPLITUDE
+            fs = Nfft * delta_f
+
             velocity = VEL_MAP[self.vel_var.get()]
-            chan_type = self.chan_var.get()
+            profile = self.chan_profile.get()
             taps_L = max(1, int(self.taps_var.get()))
             n_mc = max(1, int(self.mc_var.get()))
-            # El SNR máximo de la lista se usa para la simulación de imagen
             snr_sim = max(self.snr_list)
 
-            # --- Carga y serialización de imagen ---
-            # Redimensionamiento proporcional: el lado mayor queda en max_side px;
-            # el otro lado se escala al mismo factor para no distorsionar la imagen.
+            # -- Imagen --
             max_side = max(8, int(self.max_side_var.get()))
             img = Image.open(self.img_path.get()).convert("L")
             w, h = img.size
@@ -306,100 +281,229 @@ class OFDM_Simulator:
                 img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
             img_arr = np.array(img)
             bits_tx = np.unpackbits(img_arr.flatten())
+            n_bits = len(bits_tx)
 
-            stats = ofdm_utils.calculate_resource_stats(bits_tx, Nfft, M)
-
-            # Zero-padding para completar el último bloque OFDM
+            # -- Recursos --
+            mod_name = self.mod_var.get()
+            M = MOD_MAP[mod_name]
             k = int(np.log2(M))
-            pad = (-len(bits_tx)) % (Nfft * k)
+            n_data = sc_map["n_data"]
+            bits_per_ofdm = n_data * k
+            n_ofdm_needed = int(np.ceil(n_bits / bits_per_ofdm))
+            total_bits_cap = n_ofdm_needed * bits_per_ofdm
+            pad_bits = total_bits_cap - n_bits
             bits_in = (
-                np.concatenate([bits_tx, np.zeros(pad, np.uint8)])
-                if pad
-                else bits_tx.copy()
+                np.pad(bits_tx, (0, pad_bits)) if pad_bits else bits_tx.copy()
             )
 
-            # --- TX ---
+            # -- TX --
             self._status("Modulando y transmitiendo...")
             symbols_tx = ofdm_tx.qam_mod(bits_in, M)
-            tx_signal, papr_list = ofdm_tx.ofdm_tx_block(symbols_tx, Nfft, cp_len)
+            tx_signal, papr_list, n_ofdm = ofdm_tx.ofdm_tx_block(
+                symbols_tx, Nfft, cp_len, sc_map, pilot_value
+            )
 
-            # --- Canal ---
-            if chan_type == "Rayleigh (NLoS)":
-                h = ofdm_channel.multipath_rayleigh_channel(taps_L)
-            elif chan_type == "Rician (LoS)":
-                h = ofdm_channel.multipath_rician_channel(taps_L)
-            else:
-                h = None  # Canal Ideal: solo AWGN
-
+            # -- Canal --
+            h_impulse = ofdm_channel.get_channel_profile(profile, taps_L)
             rx_signal, h_used = ofdm_channel.apply_channel(
-                tx_signal, chan_type, snr_sim, h, velocity_kmh=velocity
+                tx_signal, h_impulse, snr_sim, velocity, fs=fs
             )
 
-            # --- RX (cadena real, reemplaza la simulación de error anterior) ---
-            Y = ofdm_rx.ofdm_rx_block(rx_signal, Nfft, cp_len)
-            H_freq = np.fft.fft(h_used, n=Nfft)
-            n_ofdm_rx = len(Y) // Nfft
-            # Se asume canal constante entre símbolos OFDM (bloque fading)
-            Xhat = ofdm_rx.equalize(Y, np.tile(H_freq, n_ofdm_rx))
-            bits_rx = ofdm_rx.qam_demod(Xhat, M)[: len(bits_in)]
+            # -- RX con pilotos --
+            Y_frames = ofdm_rx.ofdm_rx_block(rx_signal, Nfft, cp_len)
+            Xhat_pilot, H_est_list = ofdm_rx.equalize_with_pilots(
+                Y_frames, sc_map, pilot_value, Nfft
+            )
+            bits_rx = ofdm_rx.qam_demod(Xhat_pilot, M)
 
-            img_rx_arr = np.packbits(bits_rx[: len(bits_tx)]).reshape(img_arr.shape)
-            psnr = self._psnr(img_arr, img_rx_arr)
+            # Ajustar longitud
+            if len(bits_rx) < total_bits_cap:
+                bits_rx = np.pad(bits_rx, (0, total_bits_cap - len(bits_rx)))
+            else:
+                bits_rx = bits_rx[:total_bits_cap]
 
-            # --- Análisis BER / CCDF del PAPR ---
-            self._status("Calculando BER y CCDF del PAPR...\n(puede tardar unos segundos)")
-            ber_data, ccdf_data = ofdm_utils.run_analysis(
-                bits_tx, Nfft, cp_len, chan_type, taps_L, self.snr_list, n_mc
+            # Reconstruir imagen
+            bits_img = bits_rx[:n_bits]
+            img_bytes = np.packbits(bits_img)
+            if len(img_bytes) > img_arr.size:
+                img_bytes = img_bytes[: img_arr.size]
+            elif len(img_bytes) < img_arr.size:
+                img_bytes = np.pad(img_bytes, (0, img_arr.size - len(img_bytes)))
+            img_rx = img_bytes.reshape(img_arr.shape)
+
+            psnr = self._psnr(img_arr, img_rx)
+            ber_img = np.mean(bits_img != bits_tx)
+
+            # Muestras de constelación
+            const_tx = symbols_tx[: min(2000, len(symbols_tx))]
+            const_rx = Xhat_pilot[: min(2000, len(Xhat_pilot))]
+
+            # -- Clasificación del canal --
+            chan_class = ofdm_utils.classify_channel(
+                h_used, fs, N_used, velocity, delta_f
             )
 
-            # --- Reporte de parámetros ---
-            mod_name = self.mod_var.get()
+            # -- Monte Carlo BER + CCDF PAPR --
+            self._status("Ejecutando Monte Carlo...\n(puede tardar)")
+            ber_data, ber_no_eq, ccdf_data = ofdm_utils.run_analysis(
+                bits_tx, Nfft, cp_len, sc_map, pilot_value,
+                profile, taps_L, self.snr_list, n_mc, velocity,
+            )
+
+            # PAPR con IC
+            papr_means, papr_ci = {}, {}
+            mods_all = {"QPSK": 4, "16QAM": 16, "64QAM": 64}
+            for mn, Mv in mods_all.items():
+                means, cis = ofdm_utils.compute_papr_vs_snr(
+                    Nfft, cp_len, Mv, sc_map, pilot_value, self.snr_list, n_mc=10,
+                )
+                papr_means[mn] = means
+                papr_ci[mn] = cis
+
+            # -- SC-FDMA --
+            self._status("Ejecutando SC-FDMA...\n(comparación con OFDM)")
+            M_dft = ofdm_tx.get_best_dft_size(sc_map["n_data"], Nfft)
+            sc_map_sc = ofdm_utils.build_scfdma_map(sc_map, M_dft)
+
+            # TX SC-FDMA (misma imagen, misma modulación)
+            k_sc = int(np.log2(M))
+            n_data_sc = M_dft
+            bits_per_ofdm_sc = n_data_sc * k_sc
+            n_ofdm_sc_needed = int(np.ceil(n_bits / bits_per_ofdm_sc))
+            total_bits_sc = n_ofdm_sc_needed * bits_per_ofdm_sc
+            pad_bits_sc = total_bits_sc - n_bits
+            bits_in_sc = np.pad(bits_tx, (0, pad_bits_sc)) if pad_bits_sc else bits_tx.copy()
+
+            symbols_tx_sc = ofdm_tx.qam_mod(bits_in_sc, M)
+            tx_signal_sc, papr_list_sc, n_ofdm_sc = ofdm_tx.scfdma_tx_block(
+                symbols_tx_sc, Nfft, cp_len, sc_map, pilot_value, M_dft
+            )
+
+            # Canal SC-FDMA (mismo canal)
+            rx_signal_sc, _ = ofdm_channel.apply_channel(
+                tx_signal_sc, h_impulse, snr_sim, velocity, fs=fs
+            )
+
+            # RX SC-FDMA
+            Y_frames_sc = ofdm_rx.ofdm_rx_block(rx_signal_sc, Nfft, cp_len)
+            Xhat_sc, _ = ofdm_rx.equalize_with_pilots(
+                Y_frames_sc, sc_map_sc, pilot_value, Nfft
+            )
+            Xhat_sc = ofdm_rx.scfdma_despread(Xhat_sc, M_dft)
+            bits_rx_sc = ofdm_rx.qam_demod(Xhat_sc, M)
+
+            if len(bits_rx_sc) < total_bits_sc:
+                bits_rx_sc = np.pad(bits_rx_sc, (0, total_bits_sc - len(bits_rx_sc)))
+            else:
+                bits_rx_sc = bits_rx_sc[:total_bits_sc]
+            ber_img_sc = np.mean(bits_rx_sc[:n_bits] != bits_tx)
+
+            # Monte Carlo SC-FDMA
+            self._status("Monte Carlo SC-FDMA...\n(puede tardar)")
+            ber_data_sc, ccdf_data_sc = ofdm_utils.run_analysis_scfdma(
+                bits_tx, Nfft, cp_len, sc_map, pilot_value,
+                profile, taps_L, self.snr_list, n_mc, velocity, M_dft,
+            )
+
+            # -- Diversidad RX --
+            NR = max(1, int(self.nr_ant_var.get()))
+            self._status("Monte Carlo Diversidad RX...\n(SISO vs MRC vs SC vs MMSE)")
+            div_results = ofdm_utils.run_analysis_diversity(
+                bits_tx, Nfft, cp_len, sc_map, pilot_value,
+                profile, taps_L, self.snr_list, n_mc, velocity, NR,
+                use_scfdma=True, M_dft=M_dft,
+            )
+
+            self._status("Generando datos de potencia diversidad...")
+            H_single, H_combined = ofdm_utils.generate_diversity_power_data(
+                Nfft, cp_len, sc_map, pilot_value, profile, taps_L,
+                snr_sim, velocity, NR, M_mod=M,
+                use_scfdma=True, M_dft=M_dft,
+            )
+
+            # -- Reporte --
+            h_px, w_px = img_arr.shape
             report = (
-                f"--- PARÁMETROS ---\n"
+                f"--- SISTEMA ---\n"
                 f"Nfft: {Nfft}  |  CP: {cp_len}\n"
-                f"Modulación: {mod_name}\n"
-                f"Canal: {chan_type}\n"
-                f"Taps (L): {taps_L}\n"
-                f"SNR simulación: {snr_sim:g} dB\n"
-                f"SNR valores: {self.snr_list}\n"
-                f"MC iter.: {n_mc}\n\n"
-                f"--- IMAGEN ---\n"
-                f"Tamaño: {img_arr.shape[1]}×{img_arr.shape[0]} px\n"
-                f"Bits TX: {len(bits_tx)}\n"
-                f"Símbolos {mod_name}: {len(symbols_tx)}\n"
-                f"OFDM símbolos: {stats['total_ofdm_symbols']}\n"
-                f"Padding: {stats['padding_zeros']} bits\n"
-                f"PAPR máx: {np.max(papr_list):.2f} dB\n"
-                f"PSNR imagen: {psnr:.2f} dB\n"
+                f"Δf: {delta_f/1e3:.0f} kHz  |  fs: {fs/1e6:.2f} MHz\n"
+                f"N_used: {N_used} ({N_used*100//Nfft}% de {Nfft})\n"
+                f"Datos OFDM: {sc_map['n_data']}\n"
+                f"Pilotos: {sc_map['n_pilots']}\n"
+                f"Guarda+DC: {sc_map['n_guard']}\n"
+                f"Bits/símbolo OFDM: {bits_per_ofdm}\n"
+                f"Ejecuciones IFFT: {n_ofdm}\n\n"
+                f"--- SC-FDMA ---\n"
+                f"DFT size: {M_dft} (auto)\n"
+                f"Datos SC-FDMA: {M_dft}\n"
+                f"PAPR máx OFDM: {np.max(papr_list):.2f} dB\n"
+                f"PAPR máx SC-FDMA: {np.max(papr_list_sc):.2f} dB\n"
+                f"BER OFDM: {ber_img:.4e}\n"
+                f"BER SC-FDMA: {ber_img_sc:.4e}\n\n"
+                f"--- IMAGEN ({mod_name}) ---\n"
+                f"Tamaño: {w_px}×{h_px} px\n"
+                f"Bits: {n_bits}  |  PSNR: {psnr:.2f} dB\n\n"
+                f"--- CANAL ---\n"
+                f"{chan_class['freq_type']}\n"
+                f"{chan_class['time_type']}\n\n"
+                f"--- DIVERSIDAD RX ---\n"
+                f"Antenas RX (NR): {NR}\n"
+                f"Técnicas: SISO, MRC, SC, MMSE\n"
             )
             self._status(report)
 
-            # Almacenar datos para las gráficas
+            # -- Almacenar datos --
             self.sim_data = {
                 "img_tx": img_arr,
-                "img_rx": img_rx_arr,
-                "symbols_tx": symbols_tx,
-                "symbols_rx": Xhat,
+                "img_rx": img_rx,
+                "psnr": psnr,
+                "ber_img": ber_img,
+                "const_tx": const_tx,
+                "const_rx": const_rx,
+                "tx_signal": tx_signal,
                 "h_used": h_used,
-                "Nfft": Nfft,
-                "cp_len": cp_len,
+                "Nfft": Nfft, "cp_len": cp_len, "N_used": N_used,
+                "fs": fs, "delta_f": delta_f,
+                "sc_map": sc_map,
+                "n_ofdm": n_ofdm,
+                "n_symbols_qam": len(symbols_tx),
+                "pad_bits": pad_bits,
                 "papr_list": papr_list,
                 "ber_data": ber_data,
+                "ber_no_eq": ber_no_eq,
                 "ccdf_data": ccdf_data,
-                "M": M,
-                "mod_name": mod_name,
+                "papr_means": papr_means,
+                "papr_ci": papr_ci,
                 "snr_list": self.snr_list.copy(),
-                "bits_tx": bits_tx,
+                "profile": profile,
+                "velocity": velocity,
+                "cp_mode": cp_mode,
+                "snr_sim": snr_sim,
+                "total_bits": n_bits,
+                "mod_selected": mod_name,
+                "chan_class": chan_class,
+                "M_dft": M_dft,
+                "sc_map_sc": sc_map_sc,
+                "tx_signal_sc": tx_signal_sc,
+                "papr_list_sc": papr_list_sc,
+                "ber_data_sc": ber_data_sc,
+                "ccdf_data_sc": ccdf_data_sc,
+                "ber_img_sc": ber_img_sc,
+                "n_ofdm_sc": n_ofdm_sc,
+                "NR": NR,
+                "div_results": div_results,
+                "H_single": H_single,
+                "H_combined": H_combined,
             }
             self.render_plots()
 
-        except Exception as exc:
-            messagebox.showerror("Error", str(exc))
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
             raise
 
-    # ------------------------------------------------------------------
-    # Plots
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # Gráficas
+    # ==============================================================
 
     def render_plots(self):
         d = self.sim_data
@@ -409,71 +513,60 @@ class OFDM_Simulator:
         self._render_tab2(d)
         self._render_tab3(d)
         self._render_tab4(d)
+        self._render_tab5(d)
+        self._render_tab6(d)
+        self._render_tab7(d)
 
-    def _embed(self, fig, tab):
-        """Inserta una figura matplotlib dentro de una pestaña Tkinter y la cierra
-        del contexto de matplotlib para liberar memoria.
-        """
-        canvas = FigureCanvasTkAgg(fig, master=tab)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-        plt.close(fig)  # libera la figura de matplotlib; el widget tkinter persiste
+    # --- Tab 1: Imagen TX/RX y constelaciones (modulación seleccionada) ---
 
-    # Tab 1 — Comparativa de imagen y diagramas de constelación TX/RX
     def _render_tab1(self, d):
         self._clear_tab(self.tab1)
+        mod = d["mod_selected"]
+        h_px, w_px = d["img_tx"].shape
 
-        mod_name = d["mod_name"]
-        n_bits = len(d["bits_tx"])
-        n_syms = len(d["symbols_tx"])
-
-        # Etiqueta informativa: bits de imagen y símbolos QAM resultantes
+        info = (
+            f"  {mod}  |  {w_px}×{h_px} px  |  Bits: {d['total_bits']}  |  "
+            f"Símbolos: {d['n_symbols_qam']}  |  OFDM: {d['n_ofdm']}  |  "
+            f"BER: {d['ber_img']:.4e}  |  PSNR: {d['psnr']:.2f} dB  "
+        )
         tk.Label(
-            self.tab1,
-            text=f"  Bits de imagen: {n_bits}   |   Símbolos {mod_name}: {n_syms}  ",
-            font=("Consolas", 11, "bold"),
-            bg="#0b314d",
-            relief="groove",
-            padx=10,
-            pady=5,
+            self.tab1, text=info, font=("Consolas", 10, "bold"),
+            bg="#0b314d", fg="white", relief="groove", padx=8, pady=4,
         ).pack(fill="x", padx=6, pady=(5, 0))
 
-        fig, axes = plt.subplots(2, 2, figsize=(10, 7))
-        fig.tight_layout(pad=3.0)
+        fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+        fig.suptitle(
+            f"{mod}  —  SNR: {d['snr_sim']} dB  |  Canal: {d['profile']}  |  "
+            f"Vel: {d['velocity']} km/h",
+            fontsize=11, fontweight="bold",
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.93], pad=2.5)
 
-        # Fila 0: imágenes TX y RX
         axes[0, 0].imshow(d["img_tx"], cmap="gray")
-        axes[0, 0].set_title("TX: Antes de transmitir")
+        axes[0, 0].set_title("TX: Imagen original")
         axes[0, 0].axis("off")
 
         axes[0, 1].imshow(d["img_rx"], cmap="gray")
-        axes[0, 1].set_title("RX: Después del Canal")
+        axes[0, 1].set_title(f"RX: PSNR {d['psnr']:.2f} dB")
         axes[0, 1].axis("off")
 
-        # Fila 1: constelaciones (máx 2000 puntos para rendimiento)
-        npts = min(2000, len(d["symbols_tx"]))
+        npts = min(2000, len(d["const_tx"]))
         axes[1, 0].scatter(
-            np.real(d["symbols_tx"][:npts]),
-            np.imag(d["symbols_tx"][:npts]),
-            s=5,
-            c="#2ecc71",
-            alpha=0.5,
+            np.real(d["const_tx"][:npts]), np.imag(d["const_tx"][:npts]),
+            s=4, alpha=0.5, c="#2ecc71",
         )
-        axes[1, 0].set_title(f"Constelación TX ({mod_name})")
+        axes[1, 0].set_title(f"Constelación TX ({mod})")
         axes[1, 0].set_xlabel("I")
         axes[1, 0].set_ylabel("Q")
         axes[1, 0].grid(True, alpha=0.3)
         axes[1, 0].set_aspect("equal")
 
-        npts_rx = min(2000, len(d["symbols_rx"]))
+        npts_rx = min(2000, len(d["const_rx"]))
         axes[1, 1].scatter(
-            np.real(d["symbols_rx"][:npts_rx]),
-            np.imag(d["symbols_rx"][:npts_rx]),
-            s=5,
-            c="#e74c3c",
-            alpha=0.5,
+            np.real(d["const_rx"][:npts_rx]), np.imag(d["const_rx"][:npts_rx]),
+            s=4, alpha=0.5, c="#e74c3c",
         )
-        axes[1, 1].set_title("Constelación RX Ecualizada")
+        axes[1, 1].set_title("Constelación RX (ecualizada por pilotos)")
         axes[1, 1].set_xlabel("I")
         axes[1, 1].set_ylabel("Q")
         axes[1, 1].grid(True, alpha=0.3)
@@ -481,82 +574,301 @@ class OFDM_Simulator:
 
         self._embed(fig, self.tab1)
 
-    # Tab 2 — Ortogonalidad de subportadoras con Delta_f = 15 kHz
+    # --- Tab 2: Subportadoras ---
+
     def _render_tab2(self, d):
         self._clear_tab(self.tab2)
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ofdm_utils.plot_subcarrier_spacing(ax)
-        self._embed(fig, self.tab2)
-
-    # Tab 3 — Respuesta en frecuencia del canal y comparativa de CP
-    def _render_tab3(self, d):
-        self._clear_tab(self.tab3)
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        fig, axes = plt.subplots(2, 2, figsize=(14, 8))
         fig.tight_layout(pad=3.0)
 
-        # Respuesta en frecuencia del canal: FFT de la respuesta al impulso h
-        H_f = np.fft.fft(d["h_used"], n=d["Nfft"])
-        axes[0].plot(np.abs(H_f), color="orange")
-        axes[0].set_title("Respuesta en Frecuencia del Canal")
-        axes[0].set_xlabel("Subportadoras")
-        axes[0].set_ylabel("|H[k]|")
-        axes[0].grid(True, alpha=0.3)
+        # [0,0] Mapa de color  |  [0,1] Barras resumen
+        ofdm_utils.plot_subcarrier_map(
+            axes[0, 0], axes[0, 1], d["sc_map"], d["Nfft"]
+        )
 
-        # CP dinámico: valores calculados según el Nfft actual de la simulación
-        Nfft = d["Nfft"]
-        ofdm_utils.plot_cp_comparison(axes[1], Nfft // 8, Nfft // 4)
+        # [1,0] Ortogonalidad sinc
+        ofdm_utils.plot_subcarrier_spacing(axes[1, 0], d["delta_f"])
 
+        # [1,1] PSD de la señal OFDM
+        from scipy import signal as sig
+
+        nperseg = min(256, d["Nfft"])
+        f_psd, Pxx = sig.welch(d["tx_signal"], d["fs"], nperseg=nperseg)
+        axes[1, 1].semilogy(f_psd / 1e6, Pxx)
+        axes[1, 1].set_title("Densidad Espectral de Potencia (OFDM)")
+        axes[1, 1].set_xlabel("Frecuencia (MHz)")
+        axes[1, 1].set_ylabel("PSD")
+        axes[1, 1].grid(True, alpha=0.3)
+
+        self._embed(fig, self.tab2)
+
+    # --- Tab 3: Canal ---
+
+    def _render_tab3(self, d):
+        self._clear_tab(self.tab3)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        fig.tight_layout(pad=3.0)
+        ofdm_utils.plot_channel_response(
+            ax1, ax2, d["h_used"], d["fs"], d["Nfft"],
+            d["profile"], d.get("chan_class"),
+        )
         self._embed(fig, self.tab3)
 
-    # Tab 4 — CCDF del PAPR y curva BER vs SNR
+    # --- Tab 4: Prefijo cíclico ---
+
     def _render_tab4(self, d):
         self._clear_tab(self.tab4)
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        fig.tight_layout(pad=3.5)
+        fig, ax = plt.subplots(figsize=(8, 5))
+        cp_n = d["Nfft"] // 8
+        cp_e = d["Nfft"] // 4
+        ofdm_utils.plot_cp_analysis(ax, cp_n, cp_e, d["Nfft"], d["fs"])
+        self._embed(fig, self.tab4)
 
-        # CCDF del PAPR: eje Y en escala log para visualizar la cola de distribución
-        for mod_name, (papr_sorted, ccdf) in d["ccdf_data"].items():
-            axes[0].semilogy(
-                papr_sorted, ccdf, label=mod_name, color=MOD_COLORS[mod_name]
-            )
-        axes[0].set_title("CCDF del PAPR (OFDM)")
-        axes[0].set_xlabel("PAPR (dB)")
-        axes[0].set_ylabel("Prob{PAPR > x}")
-        axes[0].legend()
-        axes[0].grid(True, which="both", alpha=0.4)
+    # --- Tab 5: BER y PAPR ---
 
-        # BER vs SNR: solo se grafican puntos con BER > 0 (semilogy no admite 0)
-        snr_arr = d["snr_list"]
+    def _render_tab5(self, d):
+        self._clear_tab(self.tab5)
+        fig, axes = plt.subplots(3, 2, figsize=(14, 20))
+        fig.subplots_adjust(
+            left=0.08, right=0.96, top=0.96, bottom=0.04,
+            hspace=0.40, wspace=0.28,
+        )
+
+        snr_arr = np.array(d["snr_list"])
+
+        # [0,0] BER vs SNR OFDM con pilotos + IC 95%
         any_plotted = False
-        for mod_name, ber_vals in d["ber_data"].items():
-            pairs = [(s, b) for s, b in zip(snr_arr, ber_vals) if b > 0]
-            if pairs:
-                snrs, bers = zip(*pairs)
-                axes[1].semilogy(
-                    snrs,
-                    bers,
-                    marker="o",
-                    label=mod_name,
-                    color=MOD_COLORS[mod_name],
+        for mod_name, ber_info in d["ber_data"].items():
+            means = np.array(ber_info["mean"])
+            cis = np.array(ber_info["ci"])
+            mask = means > 0
+            if np.any(mask):
+                s = snr_arr[mask]
+                m = means[mask]
+                c = cis[mask]
+                axes[0, 0].semilogy(
+                    s, m, marker="o", label=mod_name, color=MOD_COLORS[mod_name],
+                )
+                upper = m + c
+                lower = np.maximum(m - c, 1e-10)
+                axes[0, 0].fill_between(
+                    s, lower, upper, alpha=0.2, color=MOD_COLORS[mod_name],
                 )
                 any_plotted = True
         if not any_plotted:
-            axes[1].text(
-                0.5, 0.5,
-                "BER = 0 en todos los puntos\n(SNR muy alto)",
-                ha="center", va="center", transform=axes[1].transAxes,
+            axes[0, 0].text(
+                0.5, 0.5, "BER = 0 en todos los puntos",
+                ha="center", va="center", transform=axes[0, 0].transAxes,
             )
-        axes[1].set_title("Desempeño BER vs SNR")
-        axes[1].set_xlabel("SNR (dB)")
-        axes[1].set_ylabel("BER")
-        axes[1].legend()
-        axes[1].grid(True, which="both", alpha=0.4)
+        axes[0, 0].set_title("OFDM — BER vs SNR (pilotos + IC 95%)")
+        axes[0, 0].set_xlabel("SNR (dB)")
+        axes[0, 0].set_ylabel("BER")
+        axes[0, 0].legend(fontsize=8)
+        axes[0, 0].grid(True, which="both", alpha=0.3)
 
-        self._embed(fig, self.tab4)
+        # [0,1] BER vs SNR SC-FDMA con pilotos + IC 95%
+        any_plotted_sc = False
+        for mod_name, ber_info in d["ber_data_sc"].items():
+            means = np.array(ber_info["mean"])
+            cis = np.array(ber_info["ci"])
+            mask = means > 0
+            if np.any(mask):
+                s = snr_arr[mask]
+                m = means[mask]
+                c = cis[mask]
+                axes[0, 1].semilogy(
+                    s, m, marker="s", label=mod_name, color=MOD_COLORS[mod_name],
+                )
+                upper = m + c
+                lower = np.maximum(m - c, 1e-10)
+                axes[0, 1].fill_between(
+                    s, lower, upper, alpha=0.2, color=MOD_COLORS[mod_name],
+                )
+                any_plotted_sc = True
+        if not any_plotted_sc:
+            axes[0, 1].text(
+                0.5, 0.5, "BER = 0 en todos los puntos",
+                ha="center", va="center", transform=axes[0, 1].transAxes,
+            )
+        axes[0, 1].set_title(f"SC-FDMA (DFT={d['M_dft']}) — BER vs SNR (pilotos + IC 95%)")
+        axes[0, 1].set_xlabel("SNR (dB)")
+        axes[0, 1].set_ylabel("BER")
+        axes[0, 1].legend(fontsize=8)
+        axes[0, 1].grid(True, which="both", alpha=0.3)
+
+        # [1,0] Comparación con pilotos vs sin ecualización (OFDM)
+        for mod_name in d["ber_data"]:
+            m_eq = np.array(d["ber_data"][mod_name]["mean"])
+            m_noeq = np.array(d["ber_no_eq"][mod_name]["mean"])
+            color = MOD_COLORS[mod_name]
+
+            mask_eq = m_eq > 0
+            if np.any(mask_eq):
+                axes[1, 0].semilogy(
+                    snr_arr[mask_eq], m_eq[mask_eq],
+                    marker="o", color=color, label=f"{mod_name} (pilotos)",
+                )
+            mask_noeq = m_noeq > 0
+            if np.any(mask_noeq):
+                axes[1, 0].semilogy(
+                    snr_arr[mask_noeq], m_noeq[mask_noeq],
+                    marker="x", linestyle="--", color=color,
+                    label=f"{mod_name} (sin ecual.)", alpha=0.7,
+                )
+        axes[1, 0].set_title("Efecto de Ecualización por Pilotos")
+        axes[1, 0].set_xlabel("SNR (dB)")
+        axes[1, 0].set_ylabel("BER")
+        axes[1, 0].legend(fontsize=7)
+        axes[1, 0].grid(True, which="both", alpha=0.3)
+
+        # [1,1] CCDF del PAPR — OFDM (sólido) vs SC-FDMA (punteado)
+        for mod_name, (papr_sorted, ccdf) in d["ccdf_data"].items():
+            color = MOD_COLORS[mod_name]
+            axes[1, 1].semilogy(
+                papr_sorted, ccdf, color=color, label=f"{mod_name} OFDM",
+            )
+        for mod_name, (papr_sorted, ccdf) in d["ccdf_data_sc"].items():
+            color = MOD_COLORS[mod_name]
+            axes[1, 1].semilogy(
+                papr_sorted, ccdf, color=color, linestyle="--",
+                label=f"{mod_name} SC-FDMA", alpha=0.8,
+            )
+        axes[1, 1].set_title("CCDF PAPR — OFDM vs SC-FDMA")
+        axes[1, 1].set_xlabel("PAPR (dB)")
+        axes[1, 1].set_ylabel("Prob{PAPR > x}")
+        axes[1, 1].legend(fontsize=7)
+        axes[1, 1].grid(True, which="both", alpha=0.3)
+
+        # [2,0] Potencia instantánea OFDM
+        ofdm_utils.plot_papr_time_domain(
+            axes[2, 0], d["tx_signal"], d["Nfft"], d["cp_len"]
+        )
+
+        # [2,1] Potencia instantánea SC-FDMA
+        ofdm_utils.plot_papr_time_domain(
+            axes[2, 1], d["tx_signal_sc"], d["Nfft"], d["cp_len"]
+        )
+        axes[2, 1].set_title("Potencia de un Símbolo SC-FDMA")
+
+        self._embed(fig, self.tab5)
+
+
+    # --- Tab 6: OFDM vs SC-FDMA ---
+
+    def _render_tab6(self, d):
+        self._clear_tab(self.tab6)
+        M_dft = d["M_dft"]
+
+        info = (
+            f"  OFDM (IFFT={d['Nfft']})  vs  SC-FDMA (FFT={M_dft} → IFFT={d['Nfft']})  |  "
+            f"Datos OFDM: {d['sc_map']['n_data']}  |  Datos SC-FDMA: {M_dft}  |  "
+            f"Canal: {d['profile']}  |  Vel: {d['velocity']} km/h"
+        )
+        tk.Label(
+            self.tab6, text=info, font=("Consolas", 9, "bold"),
+            bg="#4a235a", fg="white", relief="groove", padx=8, pady=4,
+        ).pack(fill="x", padx=6, pady=(5, 0))
+
+        fig, axes = plt.subplots(3, 2, figsize=(14, 18))
+        fig.suptitle(
+            f"Comparación OFDM vs SC-FDMA  —  DFT={M_dft} (auto), IFFT={d['Nfft']}",
+            fontsize=12, fontweight="bold",
+        )
+        fig.subplots_adjust(
+            left=0.08, right=0.96, top=0.94, bottom=0.04,
+            hspace=0.45, wspace=0.3,
+        )
+
+        # [0,0] y [0,1] Mapas de subportadoras
+        ofdm_utils.plot_comparative_subcarrier_maps(
+            axes[0, 0], axes[0, 1],
+            d["sc_map"], d["sc_map_sc"], d["Nfft"], M_dft,
+        )
+
+        # [1,0] Conteo de subportadoras
+        ofdm_utils.plot_comparative_subcarrier_count(
+            axes[1, 0], d["sc_map"], d["sc_map_sc"], d["Nfft"], M_dft,
+        )
+
+        # [1,1] Ancho de banda
+        ofdm_utils.plot_comparative_bandwidth(
+            axes[1, 1], d["sc_map"], d["sc_map_sc"], d["delta_f"], M_dft,
+        )
+
+        # [2,0] BER comparativo
+        ofdm_utils.plot_comparative_ber(
+            axes[2, 0], d["snr_list"],
+            d["ber_data"], d["ber_data_sc"], MOD_COLORS,
+        )
+
+        # [2,1] Potencia de símbolo OFDM vs SC-FDMA
+        ofdm_utils.plot_comparative_symbol_power(
+            axes[2, 1], d["tx_signal"], d["tx_signal_sc"],
+            d["Nfft"], d["cp_len"],
+        )
+
+        self._embed(fig, self.tab6)
+
+        # Segunda figura: CCDF PAPR comparativa (más grande)
+        fig2, ax_ccdf = plt.subplots(figsize=(10, 5))
+        ofdm_utils.plot_comparative_ccdf(
+            ax_ccdf, d["ccdf_data"], d["ccdf_data_sc"], MOD_COLORS,
+        )
+        fig2.tight_layout()
+        self._embed(fig2, self.tab6)
+
+
+    # --- Tab 7: Diversidad RX ---
+
+    def _render_tab7(self, d):
+        self._clear_tab(self.tab7)
+        NR = d["NR"]
+
+        info = (
+            f"  Diversidad RX  |  NR={NR} antenas  |  "
+            f"Técnicas: SISO vs MRC vs SC vs MMSE  |  "
+            f"Canal: {d['profile']}  |  Vel: {d['velocity']} km/h  |  "
+            f"SC-FDMA (DFT={d['M_dft']})"
+        )
+        tk.Label(
+            self.tab7, text=info, font=("Consolas", 9, "bold"),
+            bg="#1a5276", fg="white", relief="groove", padx=8, pady=4,
+        ).pack(fill="x", padx=6, pady=(5, 0))
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 14))
+        fig.suptitle(
+            f"Diversidad en Recepción — NR={NR} antenas, SC-FDMA",
+            fontsize=12, fontweight="bold",
+        )
+        fig.subplots_adjust(
+            left=0.08, right=0.96, top=0.93, bottom=0.06,
+            hspace=0.35, wspace=0.28,
+        )
+
+        # [0,0] BER QPSK
+        ofdm_utils.plot_diversity_ber(
+            axes[0, 0], d["snr_list"], d["div_results"], "QPSK", NR
+        )
+
+        # [0,1] BER 16QAM
+        ofdm_utils.plot_diversity_ber(
+            axes[0, 1], d["snr_list"], d["div_results"], "16QAM", NR
+        )
+
+        # [1,0] BER 64QAM
+        ofdm_utils.plot_diversity_ber(
+            axes[1, 0], d["snr_list"], d["div_results"], "64QAM", NR
+        )
+
+        # [1,1] Ganancia de diversidad vs fading
+        ofdm_utils.plot_diversity_power_stability(
+            axes[1, 1], d["H_single"], d["H_combined"], d["Nfft"], NR
+        )
+
+        self._embed(fig, self.tab7)
 
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = OFDM_Simulator(root)
     root.mainloop()
-
