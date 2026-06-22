@@ -161,6 +161,8 @@ class OFDM_Simulator:
         self.notebook.add(self.tab7, text="7. Diversidad RX")
         self.tab8 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab8, text="8. Diversidad TX (MISO-SFBC)")
+        self.tab9 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab9, text="9. Imagen SISO vs SFBC")
 
     # helpers para layout compacto
     def _row(self, parent, label, var):
@@ -441,6 +443,13 @@ class OFDM_Simulator:
                 )
             )
 
+            # -- Transmisión de imagen en paralelo: SISO vs MISO-SFBC --
+            self._status("Transmitiendo imagen en paralelo...\n(Hebra A: SISO  |  Hebra B: SFBC)")
+            img_sfbc_cmp = ofdm_utils.transmit_image_siso_vs_sfbc(
+                bits_tx, img_arr, Nfft, cp_len, sc_map, pilot_value,
+                profile, taps_L, snr_sim, velocity, M,
+            )
+
             # -- Reporte --
             h_px, w_px = img_arr.shape
             report = (
@@ -524,6 +533,7 @@ class OFDM_Simulator:
                 "papr_inst_sc": papr_inst_sc,
                 "papr_avg_sfbc": papr_avg_sfbc,
                 "papr_avg_sc": papr_avg_sc,
+                "img_sfbc_cmp": img_sfbc_cmp,
             }
             self.render_plots()
 
@@ -547,6 +557,7 @@ class OFDM_Simulator:
         self._render_tab6(d)
         self._render_tab7(d)
         self._render_tab8(d)
+        self._render_tab9(d)
 
     # --- Tab 1: Imagen TX/RX y constelaciones (modulación seleccionada) ---
 
@@ -946,6 +957,61 @@ class OFDM_Simulator:
         )
 
         self._embed(fig, self.tab8)
+
+    # --- Tab 9: Imagen SISO vs SFBC (transmisión paralela) ---
+
+    def _render_tab9(self, d):
+        self._clear_tab(self.tab9)
+        cmp = d["img_sfbc_cmp"]
+
+        mejora = cmp["psnr_sfbc"] - cmp["psnr_siso"]
+        info = (
+            f"  Transmisión paralela de imagen  |  "
+            f"Hebra A: SISO (1 TX)  vs  Hebra B: MISO-SFBC (2 TX, Alamouti)  |  "
+            f"Canal: {d['profile']}  |  SNR: {cmp['snr_db']} dB  |  "
+            f"Mejora PSNR con SFBC: {mejora:+.2f} dB"
+        )
+        tk.Label(
+            self.tab9, text=info, font=("Consolas", 9, "bold"),
+            bg="#145a32", fg="white", relief="groove", padx=8, pady=4,
+        ).pack(fill="x", padx=6, pady=(5, 0))
+
+        fig = plt.figure(figsize=(16, 10))
+        gs = fig.add_gridspec(2, 3, height_ratios=[1.35, 1.0])
+        fig.suptitle(
+            "Transmisión de Imagen: SISO vs MISO-SFBC sobre el mismo canal",
+            fontsize=13, fontweight="bold",
+        )
+
+        ax0 = fig.add_subplot(gs[0, 0])
+        ax1 = fig.add_subplot(gs[0, 1])
+        ax2 = fig.add_subplot(gs[0, 2])
+        axc = fig.add_subplot(gs[1, :])
+
+        ofdm_utils.plot_image_panel(
+            ax0, cmp["img_orig"], "Original (Referencia)",
+        )
+        ofdm_utils.plot_image_panel(
+            ax1, cmp["img_siso"], "SISO (1 antena)",
+            subtitle=(f"PSNR = {cmp['psnr_siso']:.2f} dB   |   "
+                      f"MSE = {cmp['mse_siso']:.1f}   |   "
+                      f"BER = {cmp['ber_siso']:.2e}"),
+        )
+        ofdm_utils.plot_image_panel(
+            ax2, cmp["img_sfbc"], "MISO-SFBC (2 antenas)",
+            subtitle=(f"PSNR = {cmp['psnr_sfbc']:.2f} dB   |   "
+                      f"MSE = {cmp['mse_sfbc']:.1f}   |   "
+                      f"BER = {cmp['ber_sfbc']:.2e}"),
+        )
+
+        ofdm_utils.plot_sfbc_channel_redundancy(
+            axc, cmp["H1"], cmp["H2"], cmp["used_indices"], cmp["Nfft"],
+        )
+
+        fig.subplots_adjust(
+            left=0.05, right=0.97, top=0.90, bottom=0.08, hspace=0.30, wspace=0.10,
+        )
+        self._embed(fig, self.tab9)
 
 
 if __name__ == "__main__":

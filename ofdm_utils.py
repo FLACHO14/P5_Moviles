@@ -1263,3 +1263,198 @@ def plot_papr_instant(ax, p_sfbc, p_sc, papr_sfbc, papr_sc):
     ax.set_ylabel("Potencia normalizada (dB)")
     ax.legend(fontsize=7, loc="upper right")
     ax.grid(True, alpha=0.3)
+
+
+# ===================================================================
+# Transmisión de imagen en paralelo: SISO vs MISO-SFBC
+# ===================================================================
+
+def _bits_to_image(bits_rx, n_bits, total_bits_cap, img_shape):
+    """Reconstruye una imagen desde bits de forma robusta ante errores.
+
+    Ajusta longitud (rellena o recorta) en cada etapa para que nunca
+    falle aunque haya demasiados bits erróneos o faltantes.
+    """
+    bits_rx = np.asarray(bits_rx).astype(np.uint8).ravel()
+    if len(bits_rx) < total_bits_cap:
+        bits_rx = np.pad(bits_rx, (0, total_bits_cap - len(bits_rx)))
+    else:
+        bits_rx = bits_rx[:total_bits_cap]
+
+    bits_img = bits_rx[:n_bits]
+    img_size = int(np.prod(img_shape))
+    img_bytes = np.packbits(bits_img)
+    if len(img_bytes) > img_size:
+        img_bytes = img_bytes[:img_size]
+    elif len(img_bytes) < img_size:
+        img_bytes = np.pad(img_bytes, (0, img_size - len(img_bytes)))
+
+    return img_bytes.reshape(img_shape).astype(np.uint8)
+
+
+def _img_metrics(orig, rec):
+    """Retorna (MSE, PSNR en dB) entre la imagen original y la recibida."""
+    mse = np.mean((orig.astype(float) - rec.astype(float)) ** 2)
+    if mse <= 1e-9:
+        return 0.0, 100.0
+    psnr = 20 * np.log10(255.0 / np.sqrt(mse))
+    return float(mse), float(psnr)
+
+
+def transmit_image_siso_vs_sfbc(
+    bits_tx, img_arr, Nfft, cp_len, sc_map, pilot_value,
+    chan_profile, taps_L, snr_db, velocity_kmh, M,
+):
+    """Transmite la misma imagen por dos hilos paralelos: SISO y MISO-SFBC.
+
+    Hebra A (SISO): transmisión estándar de una antena, sin redundancia.
+    Hebra B (MISO-SFBC): código Alamouti espacio-frecuencia con 2 antenas TX,
+    mapeando (a0, a1) en la antena 1 y (-a1*, a0*) en la antena 2 sobre
+    subportadoras adyacentes, según el estándar LTE.
+
+    Ambas cadenas se ejecutan en hilos de procesamiento distintos y se
+    sincronizan al final. La reconstrucción de bits a píxeles es robusta
+    ante errores de recepción para que el proceso no se detenga.
+
+    Returns
+    -------
+    dict con imágenes reconstruidas, métricas (MSE, PSNR, BER) y las
+    respuestas de canal en frecuencia de cada antena TX.
+    """
+    import threading
+    import ofdm_tx
+    import ofdm_channel
+    import ofdm_rx
+
+    fs = Nfft * DELTA_F
+    n_bits = len(bits_tx)
+    k = int(np.log2(M))
+    n_data = sc_map["n_data"]
+    bits_per_ofdm = n_data * k
+    n_ofdm_needed = int(np.ceil(n_bits / bits_per_ofdm))
+    total_bits_cap = n_ofdm_needed * bits_per_ofdm
+    pad = total_bits_cap - n_bits
+    bits_in = np.pad(bits_tx, (0, pad)) if pad else bits_tx.copy()
+
+    # Pilotos ortogonales por antena TX para estimar H1 y H2 por separado
+    pilot_idx = sc_map["pilot_indices"]
+    sc_map_a1 = dict(sc_map); sc_map_a1["pilot_indices"] = pilot_idx[::2]
+    sc_map_a2 = dict(sc_map); sc_map_a2["pilot_indices"] = pilot_idx[1::2]
+    data_idx = sc_map["data_indices"]
+
+    out = {}
+
+    def hebra_siso():
+        syms = ofdm_tx.qam_mod(bits_in, M)
+        tx, _, _ = ofdm_tx.ofdm_tx_block(syms, Nfft, cp_len, sc_map, pilot_value)
+        h = ofdm_channel.get_channel_profile(chan_profile, taps_L)
+        rx, h_used = ofdm_channel.apply_channel(tx, h, snr_db, velocity_kmh, fs)
+        Y = ofdm_rx.ofdm_rx_block(rx, Nfft, cp_len)
+        Xhat, _ = ofdm_rx.equalize_with_pilots(Y, sc_map, pilot_value, Nfft)
+        out["siso_bits"] = ofdm_rx.qam_demod(Xhat, M)
+        out["H_siso"] = np.fft.fft(h_used, Nfft)
+
+    def hebra_sfbc():
+        syms = ofdm_tx.qam_mod(bits_in, M)
+        tx1, tx2, _, _, _, _ = ofdm_tx.sfbc_tx_2ant(
+            syms, Nfft, cp_len, sc_map, pilot_value
+        )
+        h_miso = ofdm_channel.generate_miso_channels(2, chan_profile, taps_L)
+        rx, _ = ofdm_channel.apply_channel_miso(
+            [tx1, tx2], h_miso, snr_db, velocity_kmh, fs
+        )
+        Y = ofdm_rx.ofdm_rx_block(rx, Nfft, cp_len)
+        H1 = ofdm_rx.estimate_channel_from_pilots(Y, sc_map_a1, pilot_value, Nfft)
+        H2 = ofdm_rx.estimate_channel_from_pilots(Y, sc_map_a2, pilot_value, Nfft)
+        Xhat = ofdm_rx.sfbc_decode_2ant(Y, H1, H2, sc_map, data_idx)
+        out["sfbc_bits"] = ofdm_rx.qam_demod(Xhat, M)
+        out["H1"] = np.fft.fft(h_miso[0], Nfft)
+        out["H2"] = np.fft.fft(h_miso[1], Nfft)
+
+    tA = threading.Thread(target=hebra_siso)
+    tB = threading.Thread(target=hebra_sfbc)
+    tA.start(); tB.start()
+    tA.join(); tB.join()
+
+    img_shape = img_arr.shape
+    img_siso = _bits_to_image(out["siso_bits"], n_bits, total_bits_cap, img_shape)
+    img_sfbc = _bits_to_image(out["sfbc_bits"], n_bits, total_bits_cap, img_shape)
+
+    mse_siso, psnr_siso = _img_metrics(img_arr, img_siso)
+    mse_sfbc, psnr_sfbc = _img_metrics(img_arr, img_sfbc)
+
+    def _ber(bits_rx):
+        b = np.asarray(bits_rx).astype(np.uint8).ravel()
+        if len(b) < total_bits_cap:
+            b = np.pad(b, (0, total_bits_cap - len(b)))
+        return float(np.mean(b[:n_bits] != bits_tx))
+
+    return {
+        "img_orig": img_arr,
+        "img_siso": img_siso,
+        "img_sfbc": img_sfbc,
+        "mse_siso": mse_siso, "psnr_siso": psnr_siso,
+        "mse_sfbc": mse_sfbc, "psnr_sfbc": psnr_sfbc,
+        "ber_siso": _ber(out["siso_bits"]),
+        "ber_sfbc": _ber(out["sfbc_bits"]),
+        "H_siso": out["H_siso"],
+        "H1": out["H1"], "H2": out["H2"],
+        "used_indices": sc_map["used_indices"],
+        "Nfft": Nfft,
+        "snr_db": snr_db,
+    }
+
+
+def plot_image_panel(ax, img, title, subtitle=None):
+    """Muestra una imagen en escala de grises con título y subtítulo."""
+    ax.imshow(img, cmap="gray", vmin=0, vmax=255)
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    if subtitle:
+        ax.set_xlabel(subtitle, fontsize=10)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+def plot_sfbc_channel_redundancy(ax, H1, H2, used_indices, Nfft):
+    """Magnitud del canal de las 2 antenas TX, resaltando la redundancia SFBC.
+
+    Resalta las subportadoras donde la antena 1 cae en un hueco de
+    desvanecimiento profundo pero la antena 2 mantiene buena ganancia
+    (y viceversa), que es donde la diversidad SFBC recupera el símbolo.
+    """
+    sc = np.sort(used_indices)
+    sc_centered = np.where(sc > Nfft // 2, sc - Nfft, sc)
+    o = np.argsort(sc_centered)
+    x = sc_centered[o]
+
+    h1_dB = 20 * np.log10(np.abs(H1[sc][o]) + 1e-12)
+    h2_dB = 20 * np.log10(np.abs(H2[sc][o]) + 1e-12)
+
+    ax.plot(x, h1_dB, color="#2980b9", alpha=0.85, linewidth=1.0, label="Antena TX 1")
+    ax.plot(x, h2_dB, color="#e67e22", alpha=0.85, linewidth=1.0, label="Antena TX 2")
+
+    # Huecos de desvanecimiento: una antena cae muy por debajo de su mediana
+    # pero la otra mantiene mejor ganancia → la diversidad cubre el hueco.
+    med1, med2 = np.median(h1_dB), np.median(h2_dB)
+    thr = 6.0
+    redund = ((h1_dB < med1 - thr) & (h2_dB > h1_dB + thr)) | \
+             ((h2_dB < med2 - thr) & (h1_dB > h2_dB + thr))
+
+    y_min = min(np.min(h1_dB), np.min(h2_dB)) - 2
+    y_max = max(np.max(h1_dB), np.max(h2_dB)) + 2
+    ax.fill_between(x, y_min, y_max, where=redund, color="gold", alpha=0.35,
+                    label="Redundancia SFBC (hueco cubierto)")
+    ax.set_ylim(y_min, y_max)
+
+    n_redund = int(np.sum(redund))
+    ax.annotate(
+        f"Subportadoras con hueco cubierto por diversidad: {n_redund}",
+        xy=(0.02, 0.04), xycoords="axes fraction", ha="left", va="bottom",
+        fontsize=8, bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.9),
+    )
+
+    ax.set_title("Respuesta de Canal en Frecuencia — Antenas TX 1 y 2 (SFBC)")
+    ax.set_xlabel("Subportadora (centrada en DC)")
+    ax.set_ylabel("|H(f)| (dB)")
+    ax.legend(fontsize=8, loc="upper right")
+    ax.grid(True, alpha=0.3)
