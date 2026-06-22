@@ -1006,3 +1006,260 @@ def plot_diversity_power_stability(ax, H_single, H_combined, Nfft, NR):
     ax.set_ylabel("|H|² (dB)")
     ax.legend(fontsize=8, loc="lower right")
     ax.grid(True, alpha=0.3)
+
+
+# ===================================================================
+# Diversidad en TRANSMISIÓN (MISO - SFBC) y comparativa SISO/SIMO/MISO
+# ===================================================================
+
+TXDIV_COLORS = {
+    "SISO": "#7f8c8d",
+    "SIMO-MRC": "#2ecc71",
+    "MISO-SFBC": "#e67e22",
+}
+TXDIV_MARKERS = {"SISO": "o", "SIMO-MRC": "s", "MISO-SFBC": "D"}
+
+
+def run_analysis_diversity_tx(
+    bits_tx, Nfft, cp_len, sc_map, pilot_value,
+    chan_profile, taps_L, snr_list, n_mc, velocity_kmh,
+):
+    """Monte Carlo BER con IC 95%: SISO vs SIMO-MRC (2 RX) vs MISO-SFBC (2 TX).
+
+    Las tres técnicas se evalúan sobre la misma rejilla OFDM para una
+    comparación justa. SISO es 1 TX y 1 RX; SIMO-MRC usa 1 TX y 2 RX con
+    combinación MRC en frecuencia; MISO-SFBC usa 2 TX y 1 RX con código
+    Alamouti espacio-frecuencia y decodificación en el dominio de la frecuencia.
+    """
+    import ofdm_tx
+    import ofdm_channel
+    import ofdm_rx
+
+    n_data = sc_map["n_data"]
+    fs = Nfft * DELTA_F
+
+    # Subconjuntos ortogonales de pilotos por antena TX (para estimar H1, H2)
+    pilot_idx = sc_map["pilot_indices"]
+    sc_map_a1 = dict(sc_map); sc_map_a1["pilot_indices"] = pilot_idx[::2]
+    sc_map_a2 = dict(sc_map); sc_map_a2["pilot_indices"] = pilot_idx[1::2]
+    data_idx = sc_map["data_indices"]
+
+    mods = {"QPSK": 4, "16QAM": 16, "64QAM": 64}
+    techniques = ["SISO", "SIMO-MRC", "MISO-SFBC"]
+    results = {t: {} for t in techniques}
+
+    for mod_name, M in mods.items():
+        k = int(np.log2(M))
+        bits_per_ofdm = n_data * k
+        pad = (-len(bits_tx)) % bits_per_ofdm
+        bits_in = np.pad(bits_tx, (0, pad)) if pad else bits_tx.copy()
+
+        tech_means = {t: [] for t in techniques}
+        tech_cis = {t: [] for t in techniques}
+
+        for snr_db in snr_list:
+            tech_iters = {t: [] for t in techniques}
+
+            for _ in range(n_mc):
+                s = ofdm_tx.qam_mod(bits_in, M)
+
+                # --- SISO: 1 TX, 1 RX ---
+                tx_siso, _, _ = ofdm_tx.ofdm_tx_block(
+                    s, Nfft, cp_len, sc_map, pilot_value
+                )
+                h_siso = ofdm_channel.get_channel_profile(chan_profile, taps_L)
+                rx_siso, _ = ofdm_channel.apply_channel(
+                    tx_siso, h_siso, snr_db, velocity_kmh, fs
+                )
+                Y_siso = ofdm_rx.ofdm_rx_block(rx_siso, Nfft, cp_len)
+                Xs, _ = ofdm_rx.equalize_with_pilots(Y_siso, sc_map, pilot_value, Nfft)
+                tech_iters["SISO"].append(
+                    _ber_from_symbols(Xs, M, bits_in, ofdm_rx)
+                )
+
+                # --- SIMO-MRC: 1 TX, 2 RX ---
+                channels = ofdm_channel.generate_mimo_channels(2, chan_profile, taps_L)
+                rx_list = ofdm_channel.apply_channel_mimo(
+                    tx_siso, channels, snr_db, velocity_kmh, fs
+                )
+                Y_list = [ofdm_rx.ofdm_rx_block(r, Nfft, cp_len) for r in rx_list]
+                H_all = [
+                    ofdm_rx.estimate_channel_from_pilots(Y, sc_map, pilot_value, Nfft)
+                    for Y in Y_list
+                ]
+                Xmrc, _ = ofdm_rx.combine_mrc(Y_list, H_all, sc_map)
+                tech_iters["SIMO-MRC"].append(
+                    _ber_from_symbols(Xmrc, M, bits_in, ofdm_rx)
+                )
+
+                # --- MISO-SFBC: 2 TX, 1 RX ---
+                tx1, tx2, _, _, _, _ = ofdm_tx.sfbc_tx_2ant(
+                    s, Nfft, cp_len, sc_map, pilot_value
+                )
+                h_miso = ofdm_channel.generate_miso_channels(2, chan_profile, taps_L)
+                rx_miso, _ = ofdm_channel.apply_channel_miso(
+                    [tx1, tx2], h_miso, snr_db, velocity_kmh, fs
+                )
+                Y_miso = ofdm_rx.ofdm_rx_block(rx_miso, Nfft, cp_len)
+                H1 = ofdm_rx.estimate_channel_from_pilots(Y_miso, sc_map_a1, pilot_value, Nfft)
+                H2 = ofdm_rx.estimate_channel_from_pilots(Y_miso, sc_map_a2, pilot_value, Nfft)
+                Xsfbc = ofdm_rx.sfbc_decode_2ant(Y_miso, H1, H2, sc_map, data_idx)
+                tech_iters["MISO-SFBC"].append(
+                    _ber_from_symbols(Xsfbc, M, bits_in, ofdm_rx)
+                )
+
+            for t in techniques:
+                m = np.mean(tech_iters[t])
+                sd = np.std(tech_iters[t], ddof=1) if n_mc > 1 else 0
+                tech_means[t].append(m)
+                tech_cis[t].append(1.96 * sd / np.sqrt(n_mc))
+
+        for t in techniques:
+            results[t][mod_name] = {"mean": tech_means[t], "ci": tech_cis[t]}
+
+    return results
+
+
+def _ber_from_symbols(Xhat, M, bits_in, ofdm_rx):
+    """Demodula símbolos QAM y calcula BER contra los bits de referencia."""
+    bh = ofdm_rx.qam_demod(Xhat, M)[: len(bits_in)]
+    if len(bh) < len(bits_in):
+        bh = np.pad(bh, (0, len(bits_in) - len(bh)))
+    return np.mean(bh != bits_in)
+
+
+def plot_diversity_tx_ber(ax, snr_list, txdiv_results, mod_name):
+    """BER vs SNR para SISO vs SIMO-MRC vs MISO-SFBC con IC 95%."""
+    snr_arr = np.array(snr_list)
+    for tech in ["SISO", "SIMO-MRC", "MISO-SFBC"]:
+        if mod_name not in txdiv_results[tech]:
+            continue
+        means = np.array(txdiv_results[tech][mod_name]["mean"])
+        cis = np.array(txdiv_results[tech][mod_name]["ci"])
+        color = TXDIV_COLORS[tech]
+        marker = TXDIV_MARKERS[tech]
+        mask = means > 0
+        if np.any(mask):
+            ax.semilogy(
+                snr_arr[mask], means[mask],
+                marker=marker, color=color, label=tech, markersize=5,
+            )
+            upper = means[mask] + cis[mask]
+            lower = np.maximum(means[mask] - cis[mask], 1e-10)
+            ax.fill_between(snr_arr[mask], lower, upper, alpha=0.15, color=color)
+        else:
+            ax.semilogy([], [], marker=marker, color=color, label=f"{tech} (BER=0)")
+
+    ax.set_title(f"{mod_name} — BER vs SNR + IC 95%")
+    ax.set_xlabel("SNR (dB)")
+    ax.set_ylabel("BER")
+    ax.legend(fontsize=7)
+    ax.grid(True, which="both", alpha=0.3)
+
+
+def generate_mrc_constellation_data(
+    Nfft, cp_len, sc_map, pilot_value, chan_profile, taps_L,
+    snr_db, velocity_kmh, M_mod=16, n_syms_plot=2000,
+):
+    """Genera símbolos recibidos antes (SISO) y después de MRC (2 RX).
+
+    Sirve para visualizar la reducción de dispersión del ruido por la
+    combinación de diversidad en recepción.
+    """
+    import ofdm_tx
+    import ofdm_channel
+    import ofdm_rx
+
+    n_data = sc_map["n_data"]
+    k = int(np.log2(M_mod))
+    fs = Nfft * DELTA_F
+    bits = np.random.randint(0, 2, 12 * n_data * k).astype(np.uint8)
+    syms = ofdm_tx.qam_mod(bits, M_mod)
+
+    tx, _, _ = ofdm_tx.ofdm_tx_block(syms, Nfft, cp_len, sc_map, pilot_value)
+
+    channels = ofdm_channel.generate_mimo_channels(2, chan_profile, taps_L)
+    rx_list = ofdm_channel.apply_channel_mimo(tx, channels, snr_db, velocity_kmh, fs)
+
+    Y_list = [ofdm_rx.ofdm_rx_block(r, Nfft, cp_len) for r in rx_list]
+    H_all = [
+        ofdm_rx.estimate_channel_from_pilots(Y, sc_map, pilot_value, Nfft)
+        for Y in Y_list
+    ]
+
+    # Antes: una sola antena con ecualización ZF
+    before, _ = ofdm_rx.equalize_with_pilots(Y_list[0], sc_map, pilot_value, Nfft)
+    # Después: combinación MRC de 2 antenas
+    after, _ = ofdm_rx.combine_mrc(Y_list, H_all, sc_map)
+
+    return before[:n_syms_plot], after[:n_syms_plot]
+
+
+def plot_mrc_constellation(ax, data, title, M_mod=16):
+    """Dibuja una constelación recibida (scatter I/Q)."""
+    ax.scatter(np.real(data), np.imag(data), s=4, alpha=0.35, color="#2980b9")
+    lim = 1.8
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.axhline(0, color="gray", linewidth=0.5, alpha=0.5)
+    ax.axvline(0, color="gray", linewidth=0.5, alpha=0.5)
+    ax.set_title(title)
+    ax.set_xlabel("En fase (I)")
+    ax.set_ylabel("Cuadratura (Q)")
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect("equal", adjustable="box")
+
+
+def generate_papr_instant_data(
+    Nfft, cp_len, sc_map, pilot_value, M_mod, M_dft,
+    n_show=3,
+):
+    """Genera potencia instantánea de OFDM-SFBC y SC-FDMA en multi-antena.
+
+    Compara la envolvente de potencia de una antena SFBC (OFDM puro) contra
+    la cadena SC-FDMA, evidenciando el menor PAPR de SC-FDMA incluso con
+    diversidad en transmisión.
+    """
+    import ofdm_tx
+
+    n_data = sc_map["n_data"]
+    k = int(np.log2(M_mod))
+    bits = np.random.randint(0, 2, n_show * 2 * n_data * k).astype(np.uint8)
+    syms = ofdm_tx.qam_mod(bits, M_mod)
+
+    # OFDM con SFBC (antena 1)
+    tx1, tx2, papr_sfbc, _, _, _ = ofdm_tx.sfbc_tx_2ant(
+        syms, Nfft, cp_len, sc_map, pilot_value
+    )
+    # SC-FDMA single-antenna
+    tx_sc, papr_sc, _ = ofdm_tx.scfdma_tx_block(
+        syms, Nfft, cp_len, sc_map, pilot_value, M_dft
+    )
+
+    sym_len = Nfft + cp_len
+    n_keep = min(n_show * sym_len, len(tx1), len(tx_sc))
+
+    p_sfbc = np.abs(tx1[:n_keep]) ** 2
+    p_sc = np.abs(tx_sc[:n_keep]) ** 2
+
+    # Normalizar a potencia media unitaria para comparar envolventes
+    p_sfbc = p_sfbc / np.mean(p_sfbc)
+    p_sc = p_sc / np.mean(p_sc)
+
+    return p_sfbc, p_sc, float(np.mean(papr_sfbc)), float(np.mean(papr_sc))
+
+
+def plot_papr_instant(ax, p_sfbc, p_sc, papr_sfbc, papr_sc):
+    """Dibuja la potencia instantánea normalizada de OFDM-SFBC vs SC-FDMA."""
+    n = np.arange(len(p_sfbc))
+    ax.plot(n, 10 * np.log10(p_sfbc + 1e-12), color="#e74c3c", alpha=0.8,
+            linewidth=0.9, label=f"OFDM-SFBC (PAPR={papr_sfbc:.1f} dB)")
+    ax.plot(n, 10 * np.log10(p_sc + 1e-12), color="#2980b9", alpha=0.8,
+            linewidth=0.9, label=f"SC-FDMA (PAPR={papr_sc:.1f} dB)")
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.7, alpha=0.6,
+               label="Potencia media")
+    ax.set_title("Potencia Instantánea: OFDM-SFBC vs SC-FDMA")
+    ax.set_xlabel("Muestra temporal")
+    ax.set_ylabel("Potencia normalizada (dB)")
+    ax.legend(fontsize=7, loc="upper right")
+    ax.grid(True, alpha=0.3)

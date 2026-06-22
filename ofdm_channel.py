@@ -94,3 +94,42 @@ def apply_channel_mimo(tx_signal, channels, snr_db, velocity_kmh=0, fs=1.92e6):
         noise = (np.random.randn(len(y)) + 1j * np.random.randn(len(y))) * np.sqrt(noise_pow / 2)
         rx_signals.append(y + noise)
     return rx_signals
+
+
+# -------------------------------------------------------------------
+# MISO: NT antenas de transmisión con canales independientes a 1 RX
+# -------------------------------------------------------------------
+
+def generate_miso_channels(NT, profile_name, taps_L=None):
+    """Genera NT canales independientes desde NT antenas TX a 1 RX.
+
+    Cada canal h_t representa la propagación desde antena t hasta el único receptor.
+    """
+    return [get_channel_profile(profile_name, taps_L) for _ in range(NT)]
+
+
+def apply_channel_miso(tx_signals, channels, snr_db, velocity_kmh=0, fs=1.92e6):
+    """Aplica NT canales independientes: combinación lineal de NTs señales TX.
+
+    El receptor combina: y = sum_{t=1}^{NT} conv(tx_t, h_t) + noise
+    Representa un único receptor que recibe de múltiples transmisores.
+    """
+    if not tx_signals:
+        return np.zeros(len(tx_signals[0]), dtype=complex)
+
+    len_sig = len(tx_signals[0])
+    rx_signal = np.zeros(len_sig, dtype=complex)
+
+    for tx, h in zip(tx_signals, channels):
+        y = np.convolve(tx, h, mode='full')[:len_sig]
+        y = apply_doppler(y, velocity_kmh, fs)
+        rx_signal += y
+
+    sig_pow = np.mean(np.abs(rx_signal) ** 2)
+    if sig_pow == 0:
+        sig_pow = 1.0
+    snr_lin = 10 ** (snr_db / 10)
+    noise_pow = sig_pow / snr_lin
+    noise = (np.random.randn(len_sig) + 1j * np.random.randn(len_sig)) * np.sqrt(noise_pow / 2)
+
+    return rx_signal + noise, channels

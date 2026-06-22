@@ -159,6 +159,8 @@ class OFDM_Simulator:
         self.notebook.add(self.tab6, text="6. OFDM vs SC-FDMA")
         self.tab7 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab7, text="7. Diversidad RX")
+        self.tab8 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab8, text="8. Diversidad TX (MISO-SFBC)")
 
     # helpers para layout compacto
     def _row(self, parent, label, var):
@@ -421,6 +423,24 @@ class OFDM_Simulator:
                 use_scfdma=True, M_dft=M_dft,
             )
 
+            # -- Diversidad TX (MISO-SFBC) --
+            self._status("Monte Carlo Diversidad TX...\n(SISO vs SIMO-MRC vs MISO-SFBC)")
+            txdiv_results = ofdm_utils.run_analysis_diversity_tx(
+                bits_tx, Nfft, cp_len, sc_map, pilot_value,
+                profile, taps_L, self.snr_list, n_mc, velocity,
+            )
+
+            self._status("Generando constelaciones MRC y potencia PAPR...")
+            const_mrc_before, const_mrc_after = ofdm_utils.generate_mrc_constellation_data(
+                Nfft, cp_len, sc_map, pilot_value, profile, taps_L,
+                snr_sim, velocity, M_mod=M,
+            )
+            papr_inst_sfbc, papr_inst_sc, papr_avg_sfbc, papr_avg_sc = (
+                ofdm_utils.generate_papr_instant_data(
+                    Nfft, cp_len, sc_map, pilot_value, M, M_dft,
+                )
+            )
+
             # -- Reporte --
             h_px, w_px = img_arr.shape
             report = (
@@ -448,7 +468,10 @@ class OFDM_Simulator:
                 f"{chan_class['time_type']}\n\n"
                 f"--- DIVERSIDAD RX ---\n"
                 f"Antenas RX (NR): {NR}\n"
-                f"Técnicas: SISO, MRC, SC, MMSE\n"
+                f"Técnicas: SISO, MRC, SC, MMSE\n\n"
+                f"--- DIVERSIDAD TX ---\n"
+                f"MISO-SFBC: 2 antenas TX (Alamouti)\n"
+                f"Comparativa: SISO, SIMO-MRC, MISO-SFBC\n"
             )
             self._status(report)
 
@@ -494,6 +517,13 @@ class OFDM_Simulator:
                 "div_results": div_results,
                 "H_single": H_single,
                 "H_combined": H_combined,
+                "txdiv_results": txdiv_results,
+                "const_mrc_before": const_mrc_before,
+                "const_mrc_after": const_mrc_after,
+                "papr_inst_sfbc": papr_inst_sfbc,
+                "papr_inst_sc": papr_inst_sc,
+                "papr_avg_sfbc": papr_avg_sfbc,
+                "papr_avg_sc": papr_avg_sc,
             }
             self.render_plots()
 
@@ -516,6 +546,7 @@ class OFDM_Simulator:
         self._render_tab5(d)
         self._render_tab6(d)
         self._render_tab7(d)
+        self._render_tab8(d)
 
     # --- Tab 1: Imagen TX/RX y constelaciones (modulación seleccionada) ---
 
@@ -866,6 +897,55 @@ class OFDM_Simulator:
         )
 
         self._embed(fig, self.tab7)
+
+    # --- Tab 8: Diversidad TX (MISO-SFBC) ---
+
+    def _render_tab8(self, d):
+        self._clear_tab(self.tab8)
+
+        info = (
+            f"  Diversidad TX  |  MISO-SFBC (2 TX, Alamouti)  |  "
+            f"Comparativa: SISO vs SIMO-MRC (2 RX) vs MISO-SFBC (2 TX)  |  "
+            f"Canal: {d['profile']}  |  Vel: {d['velocity']} km/h  |  "
+            f"SC-FDMA (DFT={d['M_dft']})"
+        )
+        tk.Label(
+            self.tab8, text=info, font=("Consolas", 9, "bold"),
+            bg="#7e3517", fg="white", relief="groove", padx=8, pady=4,
+        ).pack(fill="x", padx=6, pady=(5, 0))
+
+        fig, axes = plt.subplots(2, 3, figsize=(18, 11))
+        fig.suptitle(
+            "Diversidad en Transmisión — MISO con Codificación SFBC (Alamouti)",
+            fontsize=13, fontweight="bold",
+        )
+        fig.subplots_adjust(
+            left=0.06, right=0.97, top=0.92, bottom=0.07,
+            hspace=0.30, wspace=0.30,
+        )
+
+        # Fila superior: BER comparativo SISO vs SIMO-MRC vs MISO-SFBC
+        ofdm_utils.plot_diversity_tx_ber(axes[0, 0], d["snr_list"], d["txdiv_results"], "QPSK")
+        ofdm_utils.plot_diversity_tx_ber(axes[0, 1], d["snr_list"], d["txdiv_results"], "16QAM")
+        ofdm_utils.plot_diversity_tx_ber(axes[0, 2], d["snr_list"], d["txdiv_results"], "64QAM")
+
+        # Fila inferior: constelación antes/después MRC + potencia instantánea
+        ofdm_utils.plot_mrc_constellation(
+            axes[1, 0], d["const_mrc_before"],
+            f"Constelación antes de MRC (SISO) — SNR={d['snr_sim']} dB",
+            M_mod=MOD_MAP[d["mod_selected"]],
+        )
+        ofdm_utils.plot_mrc_constellation(
+            axes[1, 1], d["const_mrc_after"],
+            f"Constelación después de MRC (2 RX) — SNR={d['snr_sim']} dB",
+            M_mod=MOD_MAP[d["mod_selected"]],
+        )
+        ofdm_utils.plot_papr_instant(
+            axes[1, 2], d["papr_inst_sfbc"], d["papr_inst_sc"],
+            d["papr_avg_sfbc"], d["papr_avg_sc"],
+        )
+
+        self._embed(fig, self.tab8)
 
 
 if __name__ == "__main__":
