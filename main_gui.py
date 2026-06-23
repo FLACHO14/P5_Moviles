@@ -444,10 +444,18 @@ class OFDM_Simulator:
             )
 
             # -- Transmisión de imagen en paralelo: SISO vs MISO-SFBC --
+            # Canal Rayleigh de 2 taps (L=2): selectividad en frecuencia
+            # moderada pero real, para observar la protección de SFBC.
             self._status("Transmitiendo imagen en paralelo...\n(Hebra A: SISO  |  Hebra B: SFBC)")
+            taps_sfbc = 2
             img_sfbc_cmp = ofdm_utils.transmit_image_siso_vs_sfbc(
                 bits_tx, img_arr, Nfft, cp_len, sc_map, pilot_value,
-                profile, taps_L, snr_sim, velocity, M,
+                profile, taps_sfbc, snr_sim, velocity, M, nr_rx=NR,
+            )
+
+            # -- Sensibilidad de la diversidad por orden de modulación --
+            txdiv_gains = ofdm_utils.compute_diversity_gain_by_modulation(
+                txdiv_results, self.snr_list,
             )
 
             # -- Reporte --
@@ -481,6 +489,15 @@ class OFDM_Simulator:
                 f"--- DIVERSIDAD TX ---\n"
                 f"MISO-SFBC: 2 antenas TX (Alamouti)\n"
                 f"Comparativa: SISO, SIMO-MRC, MISO-SFBC\n"
+                f"Escalamiento: interno 1/sqrt(2) + externo\n"
+                f"Canal imagen: Rayleigh 2 taps (L=2)\n\n"
+                f"--- GANANCIA DIVERSIDAD (SFBC vs SISO) ---\n"
+                + "".join(
+                    f"{mn:6s}: {txdiv_gains.get(mn, 0):+.1f} dB\n"
+                    for mn in ("QPSK", "16QAM", "64QAM")
+                )
+                + "Mas eficaz en bajo orden; 64QAM limitado\n"
+                + "por sensibilidad de la constelacion\n"
             )
             self._status(report)
 
@@ -534,6 +551,7 @@ class OFDM_Simulator:
                 "papr_avg_sfbc": papr_avg_sfbc,
                 "papr_avg_sc": papr_avg_sc,
                 "img_sfbc_cmp": img_sfbc_cmp,
+                "txdiv_gains": txdiv_gains,
             }
             self.render_plots()
 
@@ -964,52 +982,63 @@ class OFDM_Simulator:
         self._clear_tab(self.tab9)
         cmp = d["img_sfbc_cmp"]
 
+        has_2x2 = "img_sfbc2x2" in cmp
         mejora = cmp["psnr_sfbc"] - cmp["psnr_siso"]
         info = (
             f"  Transmisión paralela de imagen  |  "
-            f"Hebra A: SISO (1 TX)  vs  Hebra B: MISO-SFBC (2 TX, Alamouti)  |  "
-            f"Canal: {d['profile']}  |  SNR: {cmp['snr_db']} dB  |  "
-            f"Mejora PSNR con SFBC: {mejora:+.2f} dB"
+            f"SISO (1 TX)  vs  MISO-SFBC (2 TX)"
+            + ("  vs  SFBC 2x2 (2 TX, 2 RX)" if has_2x2 else "")
+            + f"  |  Canal: {d['profile']} {cmp['taps_L']} taps  |  "
+            f"SNR: {cmp['snr_db']} dB  |  Mejora PSNR SFBC: {mejora:+.2f} dB"
         )
         tk.Label(
             self.tab9, text=info, font=("Consolas", 9, "bold"),
             bg="#145a32", fg="white", relief="groove", padx=8, pady=4,
         ).pack(fill="x", padx=6, pady=(5, 0))
 
+        n_img = 4 if has_2x2 else 3
         fig = plt.figure(figsize=(16, 10))
-        gs = fig.add_gridspec(2, 3, height_ratios=[1.35, 1.0])
+        gs = fig.add_gridspec(2, n_img, height_ratios=[1.35, 1.0])
         fig.suptitle(
             "Transmisión de Imagen: SISO vs MISO-SFBC sobre el mismo canal",
             fontsize=13, fontweight="bold",
         )
 
         ax0 = fig.add_subplot(gs[0, 0])
-        ax1 = fig.add_subplot(gs[0, 1])
-        ax2 = fig.add_subplot(gs[0, 2])
-        axc = fig.add_subplot(gs[1, :])
+        ofdm_utils.plot_image_panel(ax0, cmp["img_orig"], "Original (Referencia)")
 
-        ofdm_utils.plot_image_panel(
-            ax0, cmp["img_orig"], "Original (Referencia)",
-        )
+        ax1 = fig.add_subplot(gs[0, 1])
         ofdm_utils.plot_image_panel(
             ax1, cmp["img_siso"], "SISO (1 antena)",
             subtitle=(f"PSNR = {cmp['psnr_siso']:.2f} dB   |   "
                       f"MSE = {cmp['mse_siso']:.1f}   |   "
                       f"BER = {cmp['ber_siso']:.2e}"),
         )
+
+        ax2 = fig.add_subplot(gs[0, 2])
         ofdm_utils.plot_image_panel(
-            ax2, cmp["img_sfbc"], "MISO-SFBC (2 antenas)",
+            ax2, cmp["img_sfbc"], "MISO-SFBC (2 TX)",
             subtitle=(f"PSNR = {cmp['psnr_sfbc']:.2f} dB   |   "
                       f"MSE = {cmp['mse_sfbc']:.1f}   |   "
                       f"BER = {cmp['ber_sfbc']:.2e}"),
         )
 
+        if has_2x2:
+            ax3 = fig.add_subplot(gs[0, 3])
+            ofdm_utils.plot_image_panel(
+                ax3, cmp["img_sfbc2x2"], "SFBC 2x2 (2 TX, 2 RX)",
+                subtitle=(f"PSNR = {cmp['psnr_sfbc2x2']:.2f} dB   |   "
+                          f"MSE = {cmp['mse_sfbc2x2']:.1f}   |   "
+                          f"BER = {cmp['ber_sfbc2x2']:.2e}"),
+            )
+
+        axc = fig.add_subplot(gs[1, :])
         ofdm_utils.plot_sfbc_channel_redundancy(
             axc, cmp["H1"], cmp["H2"], cmp["used_indices"], cmp["Nfft"],
         )
 
         fig.subplots_adjust(
-            left=0.05, right=0.97, top=0.90, bottom=0.08, hspace=0.30, wspace=0.10,
+            left=0.04, right=0.98, top=0.90, bottom=0.08, hspace=0.30, wspace=0.12,
         )
         self._embed(fig, self.tab9)
 

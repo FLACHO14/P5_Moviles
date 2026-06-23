@@ -179,6 +179,17 @@ def sfbc_tx_2ant(data_symbols, Nfft, cp_len, sc_map, pilot_value):
     la antena 1 transmite en pilot_indices_ant1 y cero en los de la antena 2,
     y viceversa, lo que permite estimar H1 y H2 por separado.
 
+    Lógica de paridad (símbolo dummy): el patrón de Alamouti necesita un
+    número par de subportadoras de datos para formar los pares (a0, a1). Si
+    el número es impar, se inserta un símbolo dummy (cero) en la última
+    subportadora para completar el par y evitar errores de mapeo.
+
+    Escalamiento interno de potencia: cada antena emite a 1/sqrt(NT) de la
+    amplitud, de modo que la suma de potencia de las dos antenas iguale a la
+    de un sistema SISO de una sola antena. Junto con la normalización externa
+    del canal, esto evita que el escenario SFBC tenga una ventaja injusta de
+    potencia frente a SISO.
+
     Returns
     -------
     tx1, tx2 : ndarray complex
@@ -211,7 +222,15 @@ def sfbc_tx_2ant(data_symbols, Nfft, cp_len, sc_map, pilot_value):
     pilot_indices_ant1 = pilot_idx[::2]
     pilot_indices_ant2 = pilot_idx[1::2]
 
-    n_pairs = (n_data // 2) * 2
+    # Validación de paridad: si el número de subportadoras de datos es impar,
+    # la última queda sin par y se trata con un símbolo dummy (s1 = 0).
+    n_used = len(data_idx)
+    dummy_added = (n_used % 2 == 1)
+    n_pairs = n_used - 1 if dummy_added else n_used
+
+    # Escalamiento interno: 1/sqrt(NT) por antena (NT = 2 antenas TX).
+    NT = 2
+    power_scale = 1.0 / np.sqrt(NT)
 
     for i in range(n_ofdm):
         frame = data_frames[i]
@@ -231,8 +250,18 @@ def sfbc_tx_2ant(data_symbols, Nfft, cp_len, sc_map, pilot_value):
             X2[k1] = s1
             X2[k2] = np.conj(s0)
 
+        # Subportadora impar sobrante: símbolo dummy (sin par, solo antena 1)
+        if dummy_added:
+            k_last = data_idx[n_used - 1]
+            X1[k_last] = frame[n_used - 1]
+            X2[k_last] = 0.0  # dummy: la antena 2 no aporta en esta subportadora
+
         X1[pilot_indices_ant1] = pilot_value
         X2[pilot_indices_ant2] = pilot_value
+
+        # Escalamiento interno de potencia por antena
+        X1 *= power_scale
+        X2 *= power_scale
 
         x1 = np.fft.ifft(X1)
         x2 = np.fft.ifft(X2)

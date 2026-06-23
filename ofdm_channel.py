@@ -109,10 +109,17 @@ def generate_miso_channels(NT, profile_name, taps_L=None):
 
 
 def apply_channel_miso(tx_signals, channels, snr_db, velocity_kmh=0, fs=1.92e6):
-    """Aplica NT canales independientes: combinación lineal de NTs señales TX.
+    """Aplica NT canales independientes: combinación lineal de NT señales TX.
 
     El receptor combina: y = sum_{t=1}^{NT} conv(tx_t, h_t) + noise
     Representa un único receptor que recibe de múltiples transmisores.
+
+    Normalización externa de potencia: el ruido se calibra respecto a la
+    potencia TOTAL recibida DESPUÉS de la codificación SFBC (la suma de las
+    contribuciones de todas las antenas). Combinado con el escalamiento
+    interno 1/sqrt(NT) aplicado en el transmisor, esto asegura que el
+    escenario SFBC no disponga de más potencia total que el SISO, por lo que
+    la comparación de BER es justa (doble escalamiento de potencia).
     """
     if not tx_signals:
         return np.zeros(len(tx_signals[0]), dtype=complex)
@@ -125,6 +132,7 @@ def apply_channel_miso(tx_signals, channels, snr_db, velocity_kmh=0, fs=1.92e6):
         y = apply_doppler(y, velocity_kmh, fs)
         rx_signal += y
 
+    # Normalización externa: potencia total recibida tras la codificación
     sig_pow = np.mean(np.abs(rx_signal) ** 2)
     if sig_pow == 0:
         sig_pow = 1.0

@@ -318,7 +318,7 @@ def scfdma_despread(eq_symbols, M_dft):
 # -------------------------------------------------------------------
 
 def sfbc_decode_2ant(Y_frames_rx, H_est_tx1, H_est_tx2, sc_map, data_idx):
-    """Decodifica SFBC de 2 antenas TX en dominio de frecuencia.
+    """Decodifica SFBC de 2 antenas TX en dominio de frecuencia (1 RX).
 
     Estructura Alamouti:
     Subportadora k: X1[k]=s0, X2[k]=s1
@@ -327,9 +327,16 @@ def sfbc_decode_2ant(Y_frames_rx, H_est_tx1, H_est_tx2, sc_map, data_idx):
     Decodificación:
     ŝ0 = (H1*·Y[k] + H2·Y*[k+1]) / (|H1|² + |H2|²)
     ŝ1 = (H2*·Y[k] - H1·Y*[k+1]) / (|H1|² + |H2|²)
+
+    El escalamiento interno de potencia del TX se absorbe en la estimación
+    de canal por pilotos, por lo que se cancela en el cociente y no afecta
+    la decodificación. La subportadora dummy de paridad (si el número de
+    subportadoras es impar) se recupera con ecualización ZF de una antena.
     """
     n_frames = Y_frames_rx.shape[0]
-    Nfft = Y_frames_rx.shape[1]
+    n_used = len(data_idx)
+    dummy_added = (n_used % 2 == 1)
+    n_pairs = n_used - 1 if dummy_added else n_used
     all_data = []
 
     for i in range(n_frames):
@@ -337,22 +344,86 @@ def sfbc_decode_2ant(Y_frames_rx, H_est_tx1, H_est_tx2, sc_map, data_idx):
         H1 = H_est_tx1[i]
         H2 = H_est_tx2[i]
 
-        decoded = np.zeros(len(data_idx), dtype=complex)
+        decoded = np.zeros(n_used, dtype=complex)
 
-        for j in range(0, len(data_idx) - 1, 2):
-            if j + 1 < len(data_idx):
-                k1 = data_idx[j]
-                k2 = data_idx[j + 1]
+        for j in range(0, n_pairs, 2):
+            k1 = data_idx[j]
+            k2 = data_idx[j + 1]
 
-                h1, h2 = H1[k1], H2[k1]
-                y1, y2_conj = Y[k1], np.conj(Y[k2])
+            h1, h2 = H1[k1], H2[k1]
+            y1, y2_conj = Y[k1], np.conj(Y[k2])
 
-                denom = np.abs(h1) ** 2 + np.abs(h2) ** 2 + 1e-12
-                s0 = (np.conj(h1) * y1 + h2 * y2_conj) / denom
-                s1 = (np.conj(h2) * y1 - h1 * y2_conj) / denom
+            denom = np.abs(h1) ** 2 + np.abs(h2) ** 2 + 1e-12
+            s0 = (np.conj(h1) * y1 + h2 * y2_conj) / denom
+            s1 = (np.conj(h2) * y1 - h1 * y2_conj) / denom
 
-                decoded[j] = s0
-                decoded[j + 1] = s1
+            decoded[j] = s0
+            decoded[j + 1] = s1
+
+        # Subportadora dummy sobrante: ZF con la antena 1
+        if dummy_added:
+            k_last = data_idx[n_used - 1]
+            h1 = H1[k_last]
+            decoded[n_used - 1] = Y[k_last] * np.conj(h1) / (np.abs(h1) ** 2 + 1e-12)
+
+        all_data.extend(decoded)
+
+    return np.array(all_data)
+
+
+def sfbc_decode_2ant_2rx(Y_rx_list, H_tx1_list, H_tx2_list, sc_map, data_idx):
+    """Decodifica SFBC de 2 antenas TX combinando 2 antenas RX (MIMO 2x2).
+
+    Cada antena receptora aporta una observación independiente del mismo
+    bloque Alamouti. Las observaciones se combinan sumando numeradores y
+    denominadores (MRC entre receptores), lo que maximiza la probabilidad
+    de recuperar los símbolos frente a desvanecimientos profundos:
+
+    ŝ0 = sum_r(H1_r*·Y_r[k] + H2_r·Y_r*[k+1]) / sum_r(|H1_r|² + |H2_r|²)
+    ŝ1 = sum_r(H2_r*·Y_r[k] - H1_r·Y_r*[k+1]) / sum_r(|H1_r|² + |H2_r|²)
+
+    El orden de diversidad resultante es 4 (2 TX x 2 RX).
+    """
+    NR = len(Y_rx_list)
+    n_frames = Y_rx_list[0].shape[0]
+    n_used = len(data_idx)
+    dummy_added = (n_used % 2 == 1)
+    n_pairs = n_used - 1 if dummy_added else n_used
+    all_data = []
+
+    for i in range(n_frames):
+        decoded = np.zeros(n_used, dtype=complex)
+
+        for j in range(0, n_pairs, 2):
+            k1 = data_idx[j]
+            k2 = data_idx[j + 1]
+
+            num0 = 0j
+            num1 = 0j
+            den = 0.0
+            for r in range(NR):
+                Y = Y_rx_list[r][i]
+                h1 = H_tx1_list[r][i][k1]
+                h2 = H_tx2_list[r][i][k1]
+                y1 = Y[k1]
+                y2_conj = np.conj(Y[k2])
+                num0 += np.conj(h1) * y1 + h2 * y2_conj
+                num1 += np.conj(h2) * y1 - h1 * y2_conj
+                den += np.abs(h1) ** 2 + np.abs(h2) ** 2
+
+            den += 1e-12
+            decoded[j] = num0 / den
+            decoded[j + 1] = num1 / den
+
+        if dummy_added:
+            k_last = data_idx[n_used - 1]
+            num = 0j
+            den = 0.0
+            for r in range(NR):
+                h1 = H_tx1_list[r][i][k_last]
+                num += np.conj(h1) * Y_rx_list[r][i][k_last]
+                den += np.abs(h1) ** 2
+            decoded[n_used - 1] = num / (den + 1e-12)
 
         all_data.extend(decoded)
 

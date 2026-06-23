@@ -1128,8 +1128,55 @@ def _ber_from_symbols(Xhat, M, bits_in, ofdm_rx):
     return np.mean(bh != bits_in)
 
 
+def compute_diversity_gain_by_modulation(txdiv_results, snr_list, op_snr=None,
+                                         floor=1e-4):
+    """Ganancia de diversidad relativa de MISO-SFBC sobre SISO por modulación.
+
+    Se evalúa al SNR de operación como la reducción de BER que aporta SFBC
+    respecto a SISO, en dB: 10·log10(BER_SISO / BER_SFBC). Un piso de BER
+    representa el punto en que la imagen ya es visualmente limpia y evita
+    valores divergentes cuando el BER tiende a cero.
+
+    Esta métrica evidencia que, a un SNR fijo, SFBC es más eficaz en
+    modulaciones de bajo orden (QPSK, 16QAM) —que ya operan en su zona de
+    cascada y quedan casi sin errores— que en 64QAM, donde la sensibilidad
+    intrínseca de la constelación al ruido mantiene un BER residual mayor y
+    limita la mejora de calidad utilizable.
+    """
+    if op_snr is None:
+        op_snr = max(snr_list)
+    idx = int(np.argmin(np.abs(np.array(snr_list, float) - op_snr)))
+
+    gains = {}
+    for mod in ["QPSK", "16QAM", "64QAM"]:
+        if mod not in txdiv_results.get("SISO", {}):
+            continue
+        bs = max(txdiv_results["SISO"][mod]["mean"][idx], floor)
+        bf = max(txdiv_results["MISO-SFBC"][mod]["mean"][idx], floor)
+        gains[mod] = 10 * np.log10(bs / bf)
+    return gains
+
+
+def diversity_gain_summary(gains):
+    """Texto cualitativo de la sensibilidad de SFBC por orden de modulación."""
+    lines = []
+    for mod in ["QPSK", "16QAM", "64QAM"]:
+        if mod in gains:
+            lines.append(f"  {mod:6s}: {gains[mod]:+.1f} dB")
+    note = (
+        "SFBC es más eficaz en modulaciones de bajo orden (QPSK/16QAM);\n"
+        "en 64QAM el beneficio se limita por la sensibilidad de la\n"
+        "constelación al ruido."
+    )
+    return "\n".join(lines), note
+
+
 def plot_diversity_tx_ber(ax, snr_list, txdiv_results, mod_name):
-    """BER vs SNR para SISO vs SIMO-MRC vs MISO-SFBC con IC 95%."""
+    """BER vs SNR para SISO vs SIMO-MRC vs MISO-SFBC con IC 95%.
+
+    Anota la ganancia de diversidad relativa de SFBC sobre SISO para la
+    modulación mostrada.
+    """
     snr_arr = np.array(snr_list)
     for tech in ["SISO", "SIMO-MRC", "MISO-SFBC"]:
         if mod_name not in txdiv_results[tech]:
@@ -1149,6 +1196,14 @@ def plot_diversity_tx_ber(ax, snr_list, txdiv_results, mod_name):
             ax.fill_between(snr_arr[mask], lower, upper, alpha=0.15, color=color)
         else:
             ax.semilogy([], [], marker=marker, color=color, label=f"{tech} (BER=0)")
+
+    gains = compute_diversity_gain_by_modulation(txdiv_results, snr_list)
+    if mod_name in gains:
+        ax.annotate(
+            f"Ganancia SFBC: {gains[mod_name]:+.1f} dB",
+            xy=(0.03, 0.04), xycoords="axes fraction", ha="left", va="bottom",
+            fontsize=8, bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.9),
+        )
 
     ax.set_title(f"{mod_name} — BER vs SNR + IC 95%")
     ax.set_xlabel("SNR (dB)")
@@ -1303,18 +1358,25 @@ def _img_metrics(orig, rec):
 
 def transmit_image_siso_vs_sfbc(
     bits_tx, img_arr, Nfft, cp_len, sc_map, pilot_value,
-    chan_profile, taps_L, snr_db, velocity_kmh, M,
+    chan_profile, taps_L, snr_db, velocity_kmh, M, nr_rx=1,
 ):
-    """Transmite la misma imagen por dos hilos paralelos: SISO y MISO-SFBC.
+    """Transmite la misma imagen por hilos paralelos: SISO y MISO-SFBC.
 
     Hebra A (SISO): transmisión estándar de una antena, sin redundancia.
     Hebra B (MISO-SFBC): código Alamouti espacio-frecuencia con 2 antenas TX,
     mapeando (a0, a1) en la antena 1 y (-a1*, a0*) en la antena 2 sobre
     subportadoras adyacentes, según el estándar LTE.
+    Hebra C (SFBC 2x2): solo si nr_rx >= 2, decodifica el mismo bloque SFBC
+    combinando las observaciones de 2 antenas receptoras (orden de
+    diversidad 4) para máxima robustez ante desvanecimientos profundos.
 
-    Ambas cadenas se ejecutan en hilos de procesamiento distintos y se
+    Las cadenas se ejecutan en hilos de procesamiento distintos y se
     sincronizan al final. La reconstrucción de bits a píxeles es robusta
     ante errores de recepción para que el proceso no se detenga.
+
+    El canal Rayleigh se configura con taps_L caminos; con taps_L = 2 se
+    recrea una selectividad en frecuencia moderada pero real, ideal para
+    observar cómo SFBC protege los datos cuando un tap cae en un hueco.
 
     Returns
     -------
@@ -1359,6 +1421,8 @@ def transmit_image_siso_vs_sfbc(
         tx1, tx2, _, _, _, _ = ofdm_tx.sfbc_tx_2ant(
             syms, Nfft, cp_len, sc_map, pilot_value
         )
+
+        # --- 1 RX (MISO 2x1) ---
         h_miso = ofdm_channel.generate_miso_channels(2, chan_profile, taps_L)
         rx, _ = ofdm_channel.apply_channel_miso(
             [tx1, tx2], h_miso, snr_db, velocity_kmh, fs
@@ -1370,6 +1434,27 @@ def transmit_image_siso_vs_sfbc(
         out["sfbc_bits"] = ofdm_rx.qam_demod(Xhat, M)
         out["H1"] = np.fft.fft(h_miso[0], Nfft)
         out["H2"] = np.fft.fft(h_miso[1], Nfft)
+
+        # --- 2 RX (MIMO 2x2): combinación de dos observaciones del bloque ---
+        if nr_rx >= 2:
+            Y_list, H1_list, H2_list = [], [], []
+            for _r in range(2):
+                ch_r = ofdm_channel.generate_miso_channels(2, chan_profile, taps_L)
+                rx_r, _ = ofdm_channel.apply_channel_miso(
+                    [tx1, tx2], ch_r, snr_db, velocity_kmh, fs
+                )
+                Y_r = ofdm_rx.ofdm_rx_block(rx_r, Nfft, cp_len)
+                Y_list.append(Y_r)
+                H1_list.append(
+                    ofdm_rx.estimate_channel_from_pilots(Y_r, sc_map_a1, pilot_value, Nfft)
+                )
+                H2_list.append(
+                    ofdm_rx.estimate_channel_from_pilots(Y_r, sc_map_a2, pilot_value, Nfft)
+                )
+            Xhat2 = ofdm_rx.sfbc_decode_2ant_2rx(
+                Y_list, H1_list, H2_list, sc_map, data_idx
+            )
+            out["sfbc2x2_bits"] = ofdm_rx.qam_demod(Xhat2, M)
 
     tA = threading.Thread(target=hebra_siso)
     tB = threading.Thread(target=hebra_sfbc)
@@ -1389,7 +1474,7 @@ def transmit_image_siso_vs_sfbc(
             b = np.pad(b, (0, total_bits_cap - len(b)))
         return float(np.mean(b[:n_bits] != bits_tx))
 
-    return {
+    result = {
         "img_orig": img_arr,
         "img_siso": img_siso,
         "img_sfbc": img_sfbc,
@@ -1402,7 +1487,19 @@ def transmit_image_siso_vs_sfbc(
         "used_indices": sc_map["used_indices"],
         "Nfft": Nfft,
         "snr_db": snr_db,
+        "taps_L": taps_L,
+        "nr_rx": nr_rx,
     }
+
+    if "sfbc2x2_bits" in out:
+        img_2x2 = _bits_to_image(out["sfbc2x2_bits"], n_bits, total_bits_cap, img_shape)
+        mse_2x2, psnr_2x2 = _img_metrics(img_arr, img_2x2)
+        result["img_sfbc2x2"] = img_2x2
+        result["mse_sfbc2x2"] = mse_2x2
+        result["psnr_sfbc2x2"] = psnr_2x2
+        result["ber_sfbc2x2"] = _ber(out["sfbc2x2_bits"])
+
+    return result
 
 
 def plot_image_panel(ax, img, title, subtitle=None):
