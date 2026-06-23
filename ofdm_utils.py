@@ -1503,11 +1503,19 @@ def transmit_image_siso_vs_sfbc(
 
 
 def plot_image_panel(ax, img, title, subtitle=None):
-    """Muestra una imagen en escala de grises con título y subtítulo."""
+    """Muestra una imagen en escala de grises con título y subtítulo.
+
+    El subtítulo se coloca centrado debajo de la imagen; usar saltos de
+    línea (\\n) en subtitle para evitar que el texto se solape con los
+    paneles vecinos.
+    """
     ax.imshow(img, cmap="gray", vmin=0, vmax=255)
     ax.set_title(title, fontsize=11, fontweight="bold")
     if subtitle:
-        ax.set_xlabel(subtitle, fontsize=10)
+        ax.text(
+            0.5, -0.04, subtitle, transform=ax.transAxes,
+            ha="center", va="top", fontsize=8.5, linespacing=1.4,
+        )
     ax.set_xticks([])
     ax.set_yticks([])
 

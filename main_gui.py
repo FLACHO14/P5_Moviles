@@ -1010,16 +1010,16 @@ class OFDM_Simulator:
         ax1 = fig.add_subplot(gs[0, 1])
         ofdm_utils.plot_image_panel(
             ax1, cmp["img_siso"], "SISO (1 antena)",
-            subtitle=(f"PSNR = {cmp['psnr_siso']:.2f} dB   |   "
-                      f"MSE = {cmp['mse_siso']:.1f}   |   "
+            subtitle=(f"PSNR = {cmp['psnr_siso']:.2f} dB\n"
+                      f"MSE = {cmp['mse_siso']:.1f}\n"
                       f"BER = {cmp['ber_siso']:.2e}"),
         )
 
         ax2 = fig.add_subplot(gs[0, 2])
         ofdm_utils.plot_image_panel(
             ax2, cmp["img_sfbc"], "MISO-SFBC (2 TX)",
-            subtitle=(f"PSNR = {cmp['psnr_sfbc']:.2f} dB   |   "
-                      f"MSE = {cmp['mse_sfbc']:.1f}   |   "
+            subtitle=(f"PSNR = {cmp['psnr_sfbc']:.2f} dB\n"
+                      f"MSE = {cmp['mse_sfbc']:.1f}\n"
                       f"BER = {cmp['ber_sfbc']:.2e}"),
         )
 
@@ -1027,8 +1027,8 @@ class OFDM_Simulator:
             ax3 = fig.add_subplot(gs[0, 3])
             ofdm_utils.plot_image_panel(
                 ax3, cmp["img_sfbc2x2"], "SFBC 2x2 (2 TX, 2 RX)",
-                subtitle=(f"PSNR = {cmp['psnr_sfbc2x2']:.2f} dB   |   "
-                          f"MSE = {cmp['mse_sfbc2x2']:.1f}   |   "
+                subtitle=(f"PSNR = {cmp['psnr_sfbc2x2']:.2f} dB\n"
+                          f"MSE = {cmp['mse_sfbc2x2']:.1f}\n"
                           f"BER = {cmp['ber_sfbc2x2']:.2e}"),
             )
 
@@ -1038,7 +1038,7 @@ class OFDM_Simulator:
         )
 
         fig.subplots_adjust(
-            left=0.04, right=0.98, top=0.90, bottom=0.08, hspace=0.30, wspace=0.12,
+            left=0.04, right=0.98, top=0.90, bottom=0.08, hspace=0.42, wspace=0.14,
         )
         self._embed(fig, self.tab9)
 
