@@ -24,6 +24,9 @@ import ofdm_channel
 import ofdm_rx
 import ofdm_utils
 import ofdm_params
+import ofdm_beamforming
+
+BF_CORR_MAP = {"Baja (diversidad)": "low", "Alta (solo potencia)": "high"}
 
 MOD_MAP = {"QPSK": 4, "16QAM": 16, "64QAM": 64}
 MOD_COLORS = {"QPSK": "#3498db", "16QAM": "#2ecc71", "64QAM": "#e74c3c"}
@@ -64,6 +67,11 @@ class OFDM_Simulator:
         self.max_side_var = tk.StringVar(value="128")
         self.nr_ant_var = tk.StringVar(value="2")
 
+        # Beamforming (módulo activable)
+        self.bf_enable_var = tk.BooleanVar(value=True)
+        self.bf_nt_var = tk.StringVar(value="4")
+        self.bf_corr_var = tk.StringVar(value="Baja (diversidad)")
+
         self.snr_list = [0, 5, 10, 15, 20]
         self.sim_data = {}
 
@@ -94,6 +102,17 @@ class OFDM_Simulator:
         self._row(ctrl_frame, "Taps canal (L):", self.taps_var)
         self._row(ctrl_frame, "Espac. pilotos:", self.pilot_spacing_var)
         self._combo(ctrl_frame, "NR Antenas:", self.nr_ant_var, ["1", "2", "3", "4"])
+
+        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
+
+        # --- Beamforming (activable) ---
+        tk.Checkbutton(
+            ctrl_frame, text="Activar Beamforming", variable=self.bf_enable_var,
+            font=("Helvetica", 9, "bold"), anchor="w",
+        ).pack(fill="x", padx=5)
+        self._combo(ctrl_frame, "BF NT antenas:", self.bf_nt_var, ["2", "3", "4"])
+        self._combo(ctrl_frame, "BF Correlación:", self.bf_corr_var,
+                    list(BF_CORR_MAP.keys()))
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
 
@@ -163,6 +182,8 @@ class OFDM_Simulator:
         self.notebook.add(self.tab8, text="8. Diversidad TX (MISO-SFBC)")
         self.tab9 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab9, text="9. Imagen SISO vs SFBC")
+        self.tab10 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab10, text="10. Beamforming")
 
     # helpers para layout compacto
     def _row(self, parent, label, var):
@@ -458,6 +479,32 @@ class OFDM_Simulator:
                 txdiv_results, self.snr_list,
             )
 
+            # -- Beamforming (módulo activable) --
+            bf_data = None
+            if self.bf_enable_var.get():
+                NT_bf = max(2, int(self.bf_nt_var.get()))
+                bf_corr = BF_CORR_MAP.get(self.bf_corr_var.get(), "low")
+                self._status(
+                    f"Monte Carlo Beamforming...\n"
+                    f"(SISO vs SFBC vs Beamforming, NT={NT_bf}, corr {bf_corr})"
+                )
+                bf_results = ofdm_beamforming.run_analysis_beamforming(
+                    bits_tx, Nfft, cp_len, sc_map, pilot_value,
+                    profile, taps_L, self.snr_list, n_mc, velocity, NT_bf, bf_corr,
+                )
+                bf_Hs, bf_Hb = ofdm_beamforming.generate_beamforming_power_data(
+                    Nfft, cp_len, sc_map, pilot_value, profile, taps_L, NT_bf, bf_corr,
+                )
+                self._status("Beamforming: imagen a SNR bajo (5 dB)...")
+                bf_img = ofdm_beamforming.transmit_image_beamforming(
+                    bits_tx, img_arr, Nfft, cp_len, sc_map, pilot_value,
+                    profile, taps_L, 5, velocity, M, NT_bf, bf_corr,
+                )
+                bf_data = {
+                    "results": bf_results, "H_single": bf_Hs, "H_beam": bf_Hb,
+                    "img": bf_img, "NT": NT_bf, "correlation": bf_corr,
+                }
+
             # -- Reporte --
             h_px, w_px = img_arr.shape
             report = (
@@ -498,6 +545,14 @@ class OFDM_Simulator:
                 )
                 + "Mas eficaz en bajo orden; 64QAM limitado\n"
                 + "por sensibilidad de la constelacion\n"
+                + (
+                    "\n--- BEAMFORMING ---\n"
+                    f"NT antenas: {bf_data['NT']}  |  Correlacion: {bf_data['correlation']}\n"
+                    f"Ganancia potencia ~ {10*np.log10(bf_data['NT']):.1f} dB (factor NT)\n"
+                    f"Imagen 5 dB: SISO PSNR={bf_data['img']['psnr_siso']:.1f} | "
+                    f"BF PSNR={bf_data['img']['psnr_bf']:.1f}\n"
+                    if bf_data else "\n--- BEAMFORMING ---\nDesactivado\n"
+                )
             )
             self._status(report)
 
@@ -552,6 +607,7 @@ class OFDM_Simulator:
                 "papr_avg_sc": papr_avg_sc,
                 "img_sfbc_cmp": img_sfbc_cmp,
                 "txdiv_gains": txdiv_gains,
+                "bf_data": bf_data,
             }
             self.render_plots()
 
@@ -576,6 +632,7 @@ class OFDM_Simulator:
         self._render_tab7(d)
         self._render_tab8(d)
         self._render_tab9(d)
+        self._render_tab10(d)
 
     # --- Tab 1: Imagen TX/RX y constelaciones (modulación seleccionada) ---
 
@@ -1041,6 +1098,76 @@ class OFDM_Simulator:
             left=0.04, right=0.98, top=0.90, bottom=0.08, hspace=0.42, wspace=0.14,
         )
         self._embed(fig, self.tab9)
+
+    # --- Tab 10: Beamforming ---
+
+    def _render_tab10(self, d):
+        self._clear_tab(self.tab10)
+        bf = d.get("bf_data")
+
+        if not bf:
+            tk.Label(
+                self.tab10,
+                text="Beamforming desactivado. Marque 'Activar Beamforming' "
+                     "en el panel de parámetros y vuelva a ejecutar.",
+                font=("Consolas", 11), fg="#555", pady=40,
+            ).pack(fill="both", expand=True)
+            return
+
+        NT = bf["NT"]
+        corr = "Alta (solo potencia)" if bf["correlation"] == "high" else "Baja (diversidad)"
+        img = bf["img"]
+        info = (
+            f"  Beamforming con CSI ideal  |  NT={NT} antenas TX  |  "
+            f"Correlación: {corr}  |  Ganancia de potencia ~ "
+            f"{10*np.log10(NT):.1f} dB (factor NT)  |  Canal: {d['profile']}"
+        )
+        tk.Label(
+            self.tab10, text=info, font=("Consolas", 9, "bold"),
+            bg="#512e5f", fg="white", relief="groove", padx=8, pady=4,
+        ).pack(fill="x", padx=6, pady=(5, 0))
+
+        # Figura A: BER (3 modulaciones) + potencia recibida (relleno de huecos)
+        figA, axA = plt.subplots(2, 2, figsize=(14, 9))
+        figA.suptitle(
+            f"Beamforming — BER y Potencia Recibida (NT={NT}, {corr})",
+            fontsize=12, fontweight="bold",
+        )
+        figA.subplots_adjust(left=0.07, right=0.97, top=0.92, bottom=0.07,
+                             hspace=0.32, wspace=0.24)
+        ofdm_beamforming.plot_beamforming_ber(axA[0, 0], d["snr_list"], bf["results"], "QPSK", NT)
+        ofdm_beamforming.plot_beamforming_ber(axA[0, 1], d["snr_list"], bf["results"], "16QAM", NT)
+        ofdm_beamforming.plot_beamforming_ber(axA[1, 0], d["snr_list"], bf["results"], "64QAM", NT)
+        ofdm_beamforming.plot_beamforming_power(
+            axA[1, 1], bf["H_single"], bf["H_beam"], d["Nfft"], NT, bf["correlation"]
+        )
+        self._embed(figA, self.tab10)
+
+        # Figura B: imagen recuperada a SNR bajo (5 dB)
+        figB = plt.figure(figsize=(14, 3.6))
+        figB.suptitle(
+            f"Imagen recuperada a SNR bajo ({img['snr_db']} dB): "
+            f"SISO vs MISO-SFBC vs Beamforming",
+            fontsize=11, fontweight="bold",
+        )
+        gs = figB.add_gridspec(1, 4)
+        ofdm_utils.plot_image_panel(
+            figB.add_subplot(gs[0, 0]), img["img_orig"], "Original (Referencia)"
+        )
+        ofdm_utils.plot_image_panel(
+            figB.add_subplot(gs[0, 1]), img["img_siso"], "SISO (1 antena)",
+            subtitle=f"PSNR = {img['psnr_siso']:.2f} dB\nBER = {img['ber_siso']:.2e}",
+        )
+        ofdm_utils.plot_image_panel(
+            figB.add_subplot(gs[0, 2]), img["img_sfbc"], "MISO-SFBC (2 TX)",
+            subtitle=f"PSNR = {img['psnr_sfbc']:.2f} dB\nBER = {img['ber_sfbc']:.2e}",
+        )
+        ofdm_utils.plot_image_panel(
+            figB.add_subplot(gs[0, 3]), img["img_bf"], f"Beamforming (NT={NT})",
+            subtitle=f"PSNR = {img['psnr_bf']:.2f} dB\nBER = {img['ber_bf']:.2e}",
+        )
+        figB.subplots_adjust(left=0.03, right=0.98, top=0.80, bottom=0.16, wspace=0.12)
+        self._embed(figB, self.tab10)
 
 
 if __name__ == "__main__":
