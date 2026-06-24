@@ -67,13 +67,13 @@ class OFDM_Simulator:
         self.max_side_var = tk.StringVar(value="128")
         self.nr_ant_var = tk.StringVar(value="2")
 
-        # Beamforming (módulo activable)
-        self.bf_enable_var = tk.BooleanVar(value=True)
+        # Beamforming (se ejecuta con su propio botón, reutiliza la base)
         self.bf_nt_var = tk.StringVar(value="4")
         self.bf_corr_var = tk.StringVar(value="Baja (diversidad)")
 
         self.snr_list = [0, 5, 10, 15, 20]
         self.sim_data = {}
+        self._bf_base = None  # datos base de la última simulación principal
 
         self.setup_ui()
         self._refresh_snr_listbox()
@@ -105,14 +105,17 @@ class OFDM_Simulator:
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
 
-        # --- Beamforming (activable) ---
-        tk.Checkbutton(
-            ctrl_frame, text="Activar Beamforming", variable=self.bf_enable_var,
-            font=("Helvetica", 9, "bold"), anchor="w",
-        ).pack(fill="x", padx=5)
+        # --- Beamforming (se ejecuta aparte, reutiliza la simulación base) ---
+        ttk.Label(
+            ctrl_frame, text="Beamforming (pestaña 10):", font=("Helvetica", 9, "bold")
+        ).pack(padx=5, anchor="w")
         self._combo(ctrl_frame, "BF NT antenas:", self.bf_nt_var, ["2", "3", "4"])
         self._combo(ctrl_frame, "BF Correlación:", self.bf_corr_var,
                     list(BF_CORR_MAP.keys()))
+        tk.Button(
+            ctrl_frame, text="EJECUTAR BEAMFORMING", command=self.run_beamforming,
+            bg="#8e44ad", fg="white", font=("Helvetica", 9, "bold"),
+        ).pack(pady=(2, 4), fill="x", padx=5)
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
 
@@ -479,31 +482,19 @@ class OFDM_Simulator:
                 txdiv_results, self.snr_list,
             )
 
-            # -- Beamforming (módulo activable) --
+            # -- Beamforming: se ejecuta aparte con su propio botón --
+            # La simulación principal no calcula beamforming para ser más
+            # rápida; los datos base se guardan para que el botón de
+            # beamforming los reutilice sin repetir toda la cadena. Se limpia
+            # el beamforming anterior porque la base cambió.
             bf_data = None
-            if self.bf_enable_var.get():
-                NT_bf = max(2, int(self.bf_nt_var.get()))
-                bf_corr = BF_CORR_MAP.get(self.bf_corr_var.get(), "low")
-                self._status(
-                    f"Monte Carlo Beamforming...\n"
-                    f"(SISO vs SFBC vs Beamforming, NT={NT_bf}, corr {bf_corr})"
-                )
-                bf_results = ofdm_beamforming.run_analysis_beamforming(
-                    bits_tx, Nfft, cp_len, sc_map, pilot_value,
-                    profile, taps_L, self.snr_list, n_mc, velocity, NT_bf, bf_corr,
-                )
-                bf_Hs, bf_Hb = ofdm_beamforming.generate_beamforming_power_data(
-                    Nfft, cp_len, sc_map, pilot_value, profile, taps_L, NT_bf, bf_corr,
-                )
-                self._status("Beamforming: imagen a SNR bajo (5 dB)...")
-                bf_img = ofdm_beamforming.transmit_image_beamforming(
-                    bits_tx, img_arr, Nfft, cp_len, sc_map, pilot_value,
-                    profile, taps_L, 5, velocity, M, NT_bf, bf_corr,
-                )
-                bf_data = {
-                    "results": bf_results, "H_single": bf_Hs, "H_beam": bf_Hb,
-                    "img": bf_img, "NT": NT_bf, "correlation": bf_corr,
-                }
+            self._bf_base = {
+                "bits_tx": bits_tx, "img_arr": img_arr,
+                "Nfft": Nfft, "cp_len": cp_len, "sc_map": sc_map,
+                "pilot_value": pilot_value, "profile": profile, "taps_L": taps_L,
+                "velocity": velocity, "M": M, "n_mc": n_mc,
+                "snr_list": self.snr_list.copy(),
+            }
 
             # -- Reporte --
             h_px, w_px = img_arr.shape
@@ -545,14 +536,9 @@ class OFDM_Simulator:
                 )
                 + "Mas eficaz en bajo orden; 64QAM limitado\n"
                 + "por sensibilidad de la constelacion\n"
-                + (
-                    "\n--- BEAMFORMING ---\n"
-                    f"NT antenas: {bf_data['NT']}  |  Correlacion: {bf_data['correlation']}\n"
-                    f"Ganancia potencia ~ {10*np.log10(bf_data['NT']):.1f} dB (factor NT)\n"
-                    f"Imagen 5 dB: SISO PSNR={bf_data['img']['psnr_siso']:.1f} | "
-                    f"BF PSNR={bf_data['img']['psnr_bf']:.1f}\n"
-                    if bf_data else "\n--- BEAMFORMING ---\nDesactivado\n"
-                )
+                + "\n--- BEAMFORMING ---\n"
+                + "Use el boton EJECUTAR BEAMFORMING\n"
+                + "(pestana 10, reutiliza esta simulacion)\n"
             )
             self._status(report)
 
@@ -613,6 +599,63 @@ class OFDM_Simulator:
 
         except Exception as e:
             messagebox.showerror("Error", str(e))
+            raise
+
+    def run_beamforming(self):
+        """Ejecuta solo la parte de Beamforming reutilizando la simulación base.
+
+        Parte de los datos de la última simulación principal y recalcula
+        únicamente el análisis de beamforming con los parámetros actuales de
+        NT y correlación. De este modo no se repite toda la cadena y la
+        pestaña de beamforming se actualiza con rapidez.
+        """
+        if not self._bf_base:
+            messagebox.showinfo(
+                "Beamforming",
+                "Primero ejecute la transmisión principal. El beamforming "
+                "reutiliza esos datos como punto de partida.",
+            )
+            return
+
+        try:
+            b = self._bf_base
+            NT_bf = max(2, int(self.bf_nt_var.get()))
+            bf_corr = BF_CORR_MAP.get(self.bf_corr_var.get(), "low")
+
+            self._status(
+                f"Monte Carlo Beamforming...\n"
+                f"(SISO vs SFBC vs Beamforming, NT={NT_bf}, corr {bf_corr})"
+            )
+            bf_results = ofdm_beamforming.run_analysis_beamforming(
+                b["bits_tx"], b["Nfft"], b["cp_len"], b["sc_map"], b["pilot_value"],
+                b["profile"], b["taps_L"], b["snr_list"], b["n_mc"], b["velocity"],
+                NT_bf, bf_corr,
+            )
+            bf_Hs, bf_Hb = ofdm_beamforming.generate_beamforming_power_data(
+                b["Nfft"], b["cp_len"], b["sc_map"], b["pilot_value"],
+                b["profile"], b["taps_L"], NT_bf, bf_corr,
+            )
+            self._status("Beamforming: imagen a SNR bajo (5 dB)...")
+            bf_img = ofdm_beamforming.transmit_image_beamforming(
+                b["bits_tx"], b["img_arr"], b["Nfft"], b["cp_len"], b["sc_map"],
+                b["pilot_value"], b["profile"], b["taps_L"], 5, b["velocity"],
+                b["M"], NT_bf, bf_corr,
+            )
+            self.sim_data["bf_data"] = {
+                "results": bf_results, "H_single": bf_Hs, "H_beam": bf_Hb,
+                "img": bf_img, "NT": NT_bf, "correlation": bf_corr,
+            }
+            self._render_tab10(self.sim_data)
+            self.notebook.select(self.tab10)
+            self._status(
+                f"Beamforming listo.\nNT={NT_bf}  |  Correlación: {bf_corr}\n"
+                f"Ganancia potencia ~ {10*np.log10(NT_bf):.1f} dB\n"
+                f"Imagen 5 dB: SISO PSNR={bf_img['psnr_siso']:.1f} | "
+                f"BF PSNR={bf_img['psnr_bf']:.1f}"
+            )
+
+        except Exception as e:
+            messagebox.showerror("Error Beamforming", str(e))
             raise
 
     # ==============================================================
@@ -1108,9 +1151,11 @@ class OFDM_Simulator:
         if not bf:
             tk.Label(
                 self.tab10,
-                text="Beamforming desactivado. Marque 'Activar Beamforming' "
-                     "en el panel de parámetros y vuelva a ejecutar.",
-                font=("Consolas", 11), fg="#555", pady=40,
+                text="Ajuste BF NT antenas y BF Correlación, y pulse "
+                     "'EJECUTAR BEAMFORMING'.\nEsta parte reutiliza la "
+                     "simulación principal como punto de partida,\npor lo que "
+                     "se actualiza sin repetir toda la cadena.",
+                font=("Consolas", 11), fg="#555", pady=40, justify="left",
             ).pack(fill="both", expand=True)
             return
 
