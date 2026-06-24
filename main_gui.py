@@ -25,6 +25,7 @@ import ofdm_rx
 import ofdm_utils
 import ofdm_params
 import ofdm_beamforming
+import ofdm_mimo_lab
 
 BF_CORR_MAP = {"Baja (diversidad)": "low", "Alta (solo potencia)": "high"}
 
@@ -71,6 +72,9 @@ class OFDM_Simulator:
         self.bf_nt_var = tk.StringVar(value="4")
         self.bf_corr_var = tk.StringVar(value="Baja (diversidad)")
 
+        # Laboratorio MIMO (botón propio, reutiliza la base)
+        self.lab_sir_var = tk.StringVar(value="3")
+
         self.snr_list = [0, 5, 10, 15, 20]
         self.sim_data = {}
         self._bf_base = None  # datos base de la última simulación principal
@@ -115,6 +119,19 @@ class OFDM_Simulator:
         tk.Button(
             ctrl_frame, text="EJECUTAR BEAMFORMING", command=self.run_beamforming,
             bg="#8e44ad", fg="white", font=("Helvetica", 9, "bold"),
+        ).pack(pady=(2, 4), fill="x", padx=5)
+
+        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
+
+        # --- Laboratorio MIMO (botón propio, reutiliza la base) ---
+        ttk.Label(
+            ctrl_frame, text="Laboratorio MIMO (pestaña 11):",
+            font=("Helvetica", 9, "bold"),
+        ).pack(padx=5, anchor="w")
+        self._row(ctrl_frame, "IRC SIR (dB):", self.lab_sir_var)
+        tk.Button(
+            ctrl_frame, text="EJECUTAR LAB MIMO", command=self.run_mimo_lab,
+            bg="#c0392b", fg="white", font=("Helvetica", 9, "bold"),
         ).pack(pady=(2, 4), fill="x", padx=5)
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
@@ -187,6 +204,8 @@ class OFDM_Simulator:
         self.notebook.add(self.tab9, text="9. Imagen SISO vs SFBC")
         self.tab10 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab10, text="10. Beamforming")
+        self.tab11 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab11, text="11. Laboratorio MIMO")
 
     # helpers para layout compacto
     def _row(self, parent, label, var):
@@ -594,6 +613,7 @@ class OFDM_Simulator:
                 "img_sfbc_cmp": img_sfbc_cmp,
                 "txdiv_gains": txdiv_gains,
                 "bf_data": bf_data,
+                "lab_data": None,
             }
             self.render_plots()
 
@@ -658,6 +678,66 @@ class OFDM_Simulator:
             messagebox.showerror("Error Beamforming", str(e))
             raise
 
+    def run_mimo_lab(self):
+        """Ejecuta el laboratorio MIMO reutilizando la simulación base.
+
+        Compara en una sola corrida SISO, SIMO-MRC, SIMO-IRC, MISO-SFBC,
+        Beamforming y Multiplexación Espacial, además de la imagen recuperada
+        a SNR baja, el tiempo de procesamiento y la distribución de PAPR. El
+        canal se configura con dos taps para una selectividad moderada.
+        """
+        if not self._bf_base:
+            messagebox.showinfo(
+                "Laboratorio MIMO",
+                "Primero ejecute la transmisión principal. El laboratorio "
+                "reutiliza esos datos como punto de partida.",
+            )
+            return
+
+        try:
+            b = self._bf_base
+            NR = max(2, int(self.nr_ant_var.get()))
+            NT = max(2, int(self.bf_nt_var.get()))
+            corr = BF_CORR_MAP.get(self.bf_corr_var.get(), "low")
+            sir = float(self.lab_sir_var.get())
+            taps_lab = 2  # canal selectivo de 2 taps para el laboratorio
+
+            self._status(
+                "Laboratorio MIMO...\n(SISO, SIMO-MRC, IRC, SFBC, "
+                f"Beamforming, Mux 2x2)\nNR={NR} NT={NT} corr={corr} SIR={sir} dB"
+            )
+            lab = ofdm_mimo_lab.run_mimo_lab_analysis(
+                b["bits_tx"], b["Nfft"], b["cp_len"], b["sc_map"], b["pilot_value"],
+                b["profile"], taps_lab, b["snr_list"], b["n_mc"], b["velocity"],
+                b["M"], NR=NR, NT=NT, correlation=corr, sir_db=sir,
+            )
+            self._status("Laboratorio MIMO: imágenes a 5 dB...")
+            lab_img = ofdm_mimo_lab.transmit_image_all_modes(
+                b["bits_tx"], b["img_arr"], b["Nfft"], b["cp_len"], b["sc_map"],
+                b["pilot_value"], b["profile"], taps_lab, 5, b["velocity"],
+                b["M"], NR=NR, NT=NT, correlation=corr, sir_db=sir,
+            )
+            self._status("Laboratorio MIMO: distribución de PAPR...")
+            lab_papr = ofdm_mimo_lab.papr_distribution_data(
+                b["Nfft"], b["cp_len"], b["sc_map"], b["pilot_value"], b["M"], NT=NT,
+            )
+            self.sim_data["lab_data"] = {
+                "lab": lab, "img": lab_img, "papr": lab_papr,
+                "NR": NR, "NT": NT, "correlation": corr, "sir": sir,
+            }
+            self._render_tab11(self.sim_data)
+            self.notebook.select(self.tab11)
+            self._status(
+                f"Laboratorio MIMO listo.\nNR={NR}  NT={NT}  corr={corr}  "
+                f"SIR={sir} dB\nImagen 5 dB: SISO PSNR="
+                f"{lab_img['SISO']['psnr']:.1f} | MRC PSNR="
+                f"{lab_img['SIMO-MRC']['psnr']:.1f}"
+            )
+
+        except Exception as e:
+            messagebox.showerror("Error Laboratorio MIMO", str(e))
+            raise
+
     # ==============================================================
     # Gráficas
     # ==============================================================
@@ -676,6 +756,7 @@ class OFDM_Simulator:
         self._render_tab8(d)
         self._render_tab9(d)
         self._render_tab10(d)
+        self._render_tab11(d)
 
     # --- Tab 1: Imagen TX/RX y constelaciones (modulación seleccionada) ---
 
@@ -1213,6 +1294,69 @@ class OFDM_Simulator:
         )
         figB.subplots_adjust(left=0.03, right=0.98, top=0.80, bottom=0.16, wspace=0.12)
         self._embed(figB, self.tab10)
+
+    # --- Tab 11: Laboratorio MIMO ---
+
+    def _render_tab11(self, d):
+        self._clear_tab(self.tab11)
+        data = d.get("lab_data")
+
+        if not data:
+            tk.Label(
+                self.tab11,
+                text="Ajuste IRC SIR, NR, NT y correlación, y pulse "
+                     "'EJECUTAR LAB MIMO'.\nCompara SISO, SIMO-MRC, SIMO-IRC, "
+                     "MISO-SFBC, Beamforming y Multiplexación Espacial\n"
+                     "reutilizando la simulación principal como base.",
+                font=("Consolas", 11), fg="#555", pady=40, justify="left",
+            ).pack(fill="both", expand=True)
+            return
+
+        lab = data["lab"]
+        img = data["img"]
+        mod = d["mod_selected"]
+        info = (
+            f"  Laboratorio MIMO  |  Canal Rayleigh 2 taps  |  "
+            f"NR={data['NR']}  NT={data['NT']}  |  Correlación: {data['correlation']}  |  "
+            f"IRC SIR={data['sir']} dB  |  Modulación: {mod}"
+        )
+        tk.Label(
+            self.tab11, text=info, font=("Consolas", 9, "bold"),
+            bg="#7b241c", fg="white", relief="groove", padx=8, pady=4,
+        ).pack(fill="x", padx=6, pady=(5, 0))
+
+        # Figura A: BER comparativo + tiempo de procesamiento + PAPR
+        figA, axA = plt.subplots(1, 3, figsize=(18, 5))
+        figA.suptitle(
+            "Comparativa Multi-Antena: BER, Tiempo de Procesamiento y PAPR",
+            fontsize=12, fontweight="bold",
+        )
+        ofdm_mimo_lab.plot_lab_ber(axA[0], lab, mod)
+        ofdm_mimo_lab.plot_processing_time(axA[1], lab)
+        ofdm_mimo_lab.plot_papr_distribution(axA[2], data["papr"])
+        figA.subplots_adjust(left=0.05, right=0.98, top=0.86, bottom=0.12, wspace=0.24)
+        self._embed(figA, self.tab11)
+
+        # Figura B: imagen recuperada por modo a 5 dB
+        figB = plt.figure(figsize=(18, 3.6))
+        figB.suptitle(
+            f"Imagen recuperada a {img['snr_db']} dB por cada modo "
+            f"(la diversidad espacial preserva mejor la estructura)",
+            fontsize=11, fontweight="bold",
+        )
+        modes = ["SISO", "SIMO-MRC", "MISO-SFBC", "Beamforming"]
+        gs = figB.add_gridspec(1, 1 + len(modes))
+        ofdm_utils.plot_image_panel(
+            figB.add_subplot(gs[0, 0]), img["img_orig"], "Original (Referencia)"
+        )
+        for i, mode in enumerate(modes):
+            m = img[mode]
+            ofdm_utils.plot_image_panel(
+                figB.add_subplot(gs[0, 1 + i]), m["img"], mode,
+                subtitle=f"PSNR = {m['psnr']:.2f} dB\nBER = {m['ber']:.2e}",
+            )
+        figB.subplots_adjust(left=0.02, right=0.99, top=0.80, bottom=0.16, wspace=0.12)
+        self._embed(figB, self.tab11)
 
 
 if __name__ == "__main__":
