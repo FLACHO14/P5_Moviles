@@ -25,7 +25,7 @@ import ofdm_rx
 import ofdm_utils
 import ofdm_params
 import ofdm_beamforming
-import ofdm_mimo_lab
+import ofdm_spatial_mux
 
 BF_CORR_MAP = {"Baja (diversidad)": "low", "Alta (solo potencia)": "high"}
 
@@ -72,9 +72,6 @@ class OFDM_Simulator:
         self.bf_nt_var = tk.StringVar(value="4")
         self.bf_corr_var = tk.StringVar(value="Baja (diversidad)")
 
-        # Laboratorio MIMO (botón propio, reutiliza la base)
-        self.lab_sir_var = tk.StringVar(value="3")
-
         self.snr_list = [0, 5, 10, 15, 20]
         self.sim_data = {}
         self._bf_base = None  # datos base de la última simulación principal
@@ -88,8 +85,38 @@ class OFDM_Simulator:
 
     def setup_ui(self):
         # --- Panel lateral de controles ---
-        ctrl_frame = ttk.LabelFrame(self.root, text=" Configuración de Parámetros ")
-        ctrl_frame.pack(side="left", fill="y", padx=8, pady=8)
+        # Panel de control con scroll vertical: como ahora hay muchas opciones
+        # (beamforming, MIMO, etc.) los controles no caben de una vez, por lo
+        # que se colocan dentro de un Canvas desplazable con barra lateral.
+        ctrl_outer = ttk.Frame(self.root)
+        ctrl_outer.pack(side="left", fill="y", padx=8, pady=8)
+
+        ctrl_canvas = tk.Canvas(ctrl_outer, borderwidth=0, highlightthickness=0)
+        ctrl_scroll = ttk.Scrollbar(ctrl_outer, orient="vertical",
+                                    command=ctrl_canvas.yview)
+        ctrl_canvas.configure(yscrollcommand=ctrl_scroll.set)
+        ctrl_scroll.pack(side="right", fill="y")
+        ctrl_canvas.pack(side="left", fill="both", expand=True)
+
+        ctrl_frame = ttk.LabelFrame(ctrl_canvas, text=" Configuración de Parámetros ")
+        ctrl_window = ctrl_canvas.create_window((0, 0), window=ctrl_frame, anchor="nw")
+
+        def _ctrl_configure(event):
+            # Ajusta la región desplazable y el ancho del canvas al contenido
+            ctrl_canvas.configure(scrollregion=ctrl_canvas.bbox("all"))
+            ctrl_canvas.configure(width=ctrl_frame.winfo_reqwidth())
+        ctrl_frame.bind("<Configure>", _ctrl_configure)
+
+        def _ctrl_wheel(event):
+            # Desplaza el panel solo cuando el cursor está sobre él (o sobre
+            # cualquiera de sus controles), sin interferir con las gráficas.
+            w = event.widget
+            while w is not None:
+                if w == ctrl_outer:
+                    ctrl_canvas.yview_scroll(int(-event.delta / 120), "units")
+                    return
+                w = getattr(w, "master", None)
+        ctrl_canvas.bind_all("<MouseWheel>", _ctrl_wheel)
 
         tk.Button(
             ctrl_frame, text="CARGAR IMAGEN", command=self.load_image,
@@ -123,15 +150,14 @@ class OFDM_Simulator:
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
 
-        # --- Laboratorio MIMO (botón propio, reutiliza la base) ---
+        # --- MIMO Multiplexación Espacial 2x2 (botón propio, reutiliza la base) ---
         ttk.Label(
-            ctrl_frame, text="Laboratorio MIMO (pestaña 11):",
+            ctrl_frame, text="MIMO Mux 2x2 (pestaña 11):",
             font=("Helvetica", 9, "bold"),
         ).pack(padx=5, anchor="w")
-        self._row(ctrl_frame, "IRC SIR (dB):", self.lab_sir_var)
         tk.Button(
-            ctrl_frame, text="EJECUTAR LAB MIMO", command=self.run_mimo_lab,
-            bg="#c0392b", fg="white", font=("Helvetica", 9, "bold"),
+            ctrl_frame, text="EJECUTAR MIMO 2x2 (MMSE)", command=self.run_mimo_mux,
+            bg="#1f618d", fg="white", font=("Helvetica", 9, "bold"),
         ).pack(pady=(2, 4), fill="x", padx=5)
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
@@ -204,8 +230,8 @@ class OFDM_Simulator:
         self.notebook.add(self.tab9, text="9. Imagen SISO vs SFBC")
         self.tab10 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab10, text="10. Beamforming")
-        self.tab11 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab11, text="11. Laboratorio MIMO")
+        self.tab12 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab12, text="11. MIMO Mux 2x2 (MMSE)")
 
     # helpers para layout compacto
     def _row(self, parent, label, var):
@@ -613,7 +639,7 @@ class OFDM_Simulator:
                 "img_sfbc_cmp": img_sfbc_cmp,
                 "txdiv_gains": txdiv_gains,
                 "bf_data": bf_data,
-                "lab_data": None,
+                "mux_data": None,
             }
             self.render_plots()
 
@@ -678,64 +704,58 @@ class OFDM_Simulator:
             messagebox.showerror("Error Beamforming", str(e))
             raise
 
-    def run_mimo_lab(self):
-        """Ejecuta el laboratorio MIMO reutilizando la simulación base.
+    def run_mimo_mux(self):
+        """Ejecuta la multiplexación espacial MIMO 2x2 con detector MMSE.
 
-        Compara en una sola corrida SISO, SIMO-MRC, SIMO-IRC, MISO-SFBC,
-        Beamforming y Multiplexación Espacial, además de la imagen recuperada
-        a SNR baja, el tiempo de procesamiento y la distribución de PAPR. El
-        canal se configura con dos taps para una selectividad moderada.
+        Reutiliza la simulación base y genera la comparativa de constelaciones,
+        el BER de SISO frente a MIMO, el throughput y la imagen recuperada a 5
+        y 25 decibelios. El canal se trata como estático con CSI perfecto.
         """
         if not self._bf_base:
             messagebox.showinfo(
-                "Laboratorio MIMO",
-                "Primero ejecute la transmisión principal. El laboratorio "
+                "MIMO 2x2",
+                "Primero ejecute la transmisión principal. El módulo MIMO "
                 "reutiliza esos datos como punto de partida.",
             )
             return
 
         try:
             b = self._bf_base
-            NR = max(2, int(self.nr_ant_var.get()))
-            NT = max(2, int(self.bf_nt_var.get()))
-            corr = BF_CORR_MAP.get(self.bf_corr_var.get(), "low")
-            sir = float(self.lab_sir_var.get())
-            taps_lab = 2  # canal selectivo de 2 taps para el laboratorio
+            taps = 2  # canal selectivo de 2 caminos
 
-            self._status(
-                "Laboratorio MIMO...\n(SISO, SIMO-MRC, IRC, SFBC, "
-                f"Beamforming, Mux 2x2)\nNR={NR} NT={NT} corr={corr} SIR={sir} dB"
-            )
-            lab = ofdm_mimo_lab.run_mimo_lab_analysis(
+            self._status("MIMO 2x2 (MMSE)...\nBER SISO vs MIMO, constelaciones, "
+                         "throughput e imagen 5/25 dB")
+            ber = ofdm_spatial_mux.run_ber_siso_vs_mimo(
                 b["bits_tx"], b["Nfft"], b["cp_len"], b["sc_map"], b["pilot_value"],
-                b["profile"], taps_lab, b["snr_list"], b["n_mc"], b["velocity"],
-                b["M"], NR=NR, NT=NT, correlation=corr, sir_db=sir,
+                b["M"], b["profile"], taps, b["snr_list"], b["n_mc"], b["velocity"],
             )
-            self._status("Laboratorio MIMO: imágenes a 5 dB...")
-            lab_img = ofdm_mimo_lab.transmit_image_all_modes(
+            thr = ofdm_spatial_mux.throughput_data(
+                b["bits_tx"], b["Nfft"], b["cp_len"], b["sc_map"], b["M"],
+            )
+            self._status("MIMO 2x2: imagen a 5 y 25 dB...")
+            img5 = ofdm_spatial_mux.transmit_image_mimo(
                 b["bits_tx"], b["img_arr"], b["Nfft"], b["cp_len"], b["sc_map"],
-                b["pilot_value"], b["profile"], taps_lab, 5, b["velocity"],
-                b["M"], NR=NR, NT=NT, correlation=corr, sir_db=sir,
+                b["M"], b["profile"], taps, 5, b["velocity"],
             )
-            self._status("Laboratorio MIMO: distribución de PAPR...")
-            lab_papr = ofdm_mimo_lab.papr_distribution_data(
-                b["Nfft"], b["cp_len"], b["sc_map"], b["pilot_value"], b["M"], NT=NT,
+            img25 = ofdm_spatial_mux.transmit_image_mimo(
+                b["bits_tx"], b["img_arr"], b["Nfft"], b["cp_len"], b["sc_map"],
+                b["M"], b["profile"], taps, 25, b["velocity"],
             )
-            self.sim_data["lab_data"] = {
-                "lab": lab, "img": lab_img, "papr": lab_papr,
-                "NR": NR, "NT": NT, "correlation": corr, "sir": sir,
+            self.sim_data["mux_data"] = {
+                "ber": ber, "thr": thr, "img5": img5, "img25": img25,
+                "const": img25["const"], "M": b["M"],
             }
-            self._render_tab11(self.sim_data)
-            self.notebook.select(self.tab11)
+            self._render_tab12(self.sim_data)
+            self.notebook.select(self.tab12)
             self._status(
-                f"Laboratorio MIMO listo.\nNR={NR}  NT={NT}  corr={corr}  "
-                f"SIR={sir} dB\nImagen 5 dB: SISO PSNR="
-                f"{lab_img['SISO']['psnr']:.1f} | MRC PSNR="
-                f"{lab_img['SIMO-MRC']['psnr']:.1f}"
+                f"MIMO 2x2 listo.\nImagen 5 dB PSNR={img5['psnr']:.1f} | "
+                f"25 dB PSNR={img25['psnr']:.1f}\n"
+                f"Tiempo: SISO={thr['t_siso']*1e3:.2f} ms, "
+                f"MIMO={thr['t_mimo']*1e3:.2f} ms (x2 throughput)"
             )
 
         except Exception as e:
-            messagebox.showerror("Error Laboratorio MIMO", str(e))
+            messagebox.showerror("Error MIMO 2x2", str(e))
             raise
 
     # ==============================================================
@@ -756,7 +776,7 @@ class OFDM_Simulator:
         self._render_tab8(d)
         self._render_tab9(d)
         self._render_tab10(d)
-        self._render_tab11(d)
+        self._render_tab12(d)
 
     # --- Tab 1: Imagen TX/RX y constelaciones (modulación seleccionada) ---
 
@@ -1295,68 +1315,71 @@ class OFDM_Simulator:
         figB.subplots_adjust(left=0.03, right=0.98, top=0.80, bottom=0.16, wspace=0.12)
         self._embed(figB, self.tab10)
 
-    # --- Tab 11: Laboratorio MIMO ---
 
-    def _render_tab11(self, d):
-        self._clear_tab(self.tab11)
-        data = d.get("lab_data")
+    # --- Tab 12: MIMO Multiplexación Espacial 2x2 (MMSE) ---
+
+    def _render_tab12(self, d):
+        self._clear_tab(self.tab12)
+        data = d.get("mux_data")
 
         if not data:
             tk.Label(
-                self.tab11,
-                text="Ajuste IRC SIR, NR, NT y correlación, y pulse "
-                     "'EJECUTAR LAB MIMO'.\nCompara SISO, SIMO-MRC, SIMO-IRC, "
-                     "MISO-SFBC, Beamforming y Multiplexación Espacial\n"
-                     "reutilizando la simulación principal como base.",
+                self.tab12,
+                text="Pulse 'EJECUTAR MIMO 2x2 (MMSE)'.\nDivide el flujo en dos "
+                     "capas intercaladas, las transmite por dos antenas y las "
+                     "separa con un detector MMSE,\nduplicando la tasa de datos. "
+                     "Reutiliza la simulación principal como base.",
                 font=("Consolas", 11), fg="#555", pady=40, justify="left",
             ).pack(fill="both", expand=True)
             return
 
-        lab = data["lab"]
-        img = data["img"]
+        thr = data["thr"]
         mod = d["mod_selected"]
         info = (
-            f"  Laboratorio MIMO  |  Canal Rayleigh 2 taps  |  "
-            f"NR={data['NR']}  NT={data['NT']}  |  Correlación: {data['correlation']}  |  "
-            f"IRC SIR={data['sir']} dB  |  Modulación: {mod}"
+            f"  MIMO 2x2 Multiplexación Espacial  |  Detector MMSE con CSI perfecto  |  "
+            f"Canal Rayleigh 2 taps  |  Modulación: {mod}  |  "
+            f"Throughput x2 (tiempo a la mitad)"
         )
         tk.Label(
-            self.tab11, text=info, font=("Consolas", 9, "bold"),
-            bg="#7b241c", fg="white", relief="groove", padx=8, pady=4,
+            self.tab12, text=info, font=("Consolas", 9, "bold"),
+            bg="#1f618d", fg="white", relief="groove", padx=8, pady=4,
         ).pack(fill="x", padx=6, pady=(5, 0))
 
-        # Figura A: BER comparativo + tiempo de procesamiento + PAPR
-        figA, axA = plt.subplots(1, 3, figsize=(18, 5))
-        figA.suptitle(
-            "Comparativa Multi-Antena: BER, Tiempo de Procesamiento y PAPR",
-            fontsize=12, fontweight="bold",
-        )
-        ofdm_mimo_lab.plot_lab_ber(axA[0], lab, mod)
-        ofdm_mimo_lab.plot_processing_time(axA[1], lab)
-        ofdm_mimo_lab.plot_papr_distribution(axA[2], data["papr"])
-        figA.subplots_adjust(left=0.05, right=0.98, top=0.86, bottom=0.12, wspace=0.24)
-        self._embed(figA, self.tab11)
+        # Todo en una sola figura con tres filas para que se vea completa al
+        # escalarse dentro de la pestaña. Se usa una rejilla de 12 columnas
+        # para dar más ancho a la curva de BER y repartir bien las imágenes.
+        fig = plt.figure(figsize=(16, 12))
+        gs = fig.add_gridspec(3, 12, height_ratios=[1.0, 1.15, 1.0])
 
-        # Figura B: imagen recuperada por modo a 5 dB
-        figB = plt.figure(figsize=(18, 3.6))
-        figB.suptitle(
-            f"Imagen recuperada a {img['snr_db']} dB por cada modo "
-            f"(la diversidad espacial preserva mejor la estructura)",
-            fontsize=11, fontweight="bold",
+        # Fila 0: cuatro constelaciones (3 columnas cada una)
+        axc = [fig.add_subplot(gs[0, j:j + 3]) for j in (0, 3, 6, 9)]
+        ofdm_spatial_mux.plot_mimo_constellations(axc, data["const"], data["M"])
+        fig.suptitle(
+            "Constelaciones: mezcla recibida en cada antena y salida separada por MMSE",
+            fontsize=12, fontweight="bold", y=0.98,
         )
-        modes = ["SISO", "SIMO-MRC", "MISO-SFBC", "Beamforming"]
-        gs = figB.add_gridspec(1, 1 + len(modes))
+
+        # Fila 1: BER más ancha (7 columnas) y throughput (5 columnas)
+        ax_ber = fig.add_subplot(gs[1, 0:7])
+        ax_thr = fig.add_subplot(gs[1, 7:12])
+        ofdm_spatial_mux.plot_ber_siso_vs_mimo(ax_ber, data["ber"], d["snr_list"], mod)
+        ofdm_spatial_mux.plot_throughput(ax_thr, thr)
+
+        # Fila 2: imagen original, a 5 dB y a 25 dB (4 columnas cada una)
+        ofdm_utils.plot_image_panel(fig.add_subplot(gs[2, 0:4]), d["img_tx"],
+                                    "Original (Referencia)")
         ofdm_utils.plot_image_panel(
-            figB.add_subplot(gs[0, 0]), img["img_orig"], "Original (Referencia)"
+            fig.add_subplot(gs[2, 4:8]), data["img5"]["img"], "MIMO 2x2 a 5 dB",
+            subtitle=f"PSNR = {data['img5']['psnr']:.2f} dB",
         )
-        for i, mode in enumerate(modes):
-            m = img[mode]
-            ofdm_utils.plot_image_panel(
-                figB.add_subplot(gs[0, 1 + i]), m["img"], mode,
-                subtitle=f"PSNR = {m['psnr']:.2f} dB\nBER = {m['ber']:.2e}",
-            )
-        figB.subplots_adjust(left=0.02, right=0.99, top=0.80, bottom=0.16, wspace=0.12)
-        self._embed(figB, self.tab11)
+        ofdm_utils.plot_image_panel(
+            fig.add_subplot(gs[2, 8:12]), data["img25"]["img"], "MIMO 2x2 a 25 dB",
+            subtitle=f"PSNR = {data['img25']['psnr']:.2f} dB",
+        )
+
+        fig.subplots_adjust(left=0.05, right=0.97, top=0.91, bottom=0.05,
+                            hspace=0.55, wspace=0.55)
+        self._embed(fig, self.tab12)
 
 
 if __name__ == "__main__":
