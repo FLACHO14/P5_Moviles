@@ -26,6 +26,7 @@ import ofdm_utils
 import ofdm_params
 import ofdm_beamforming
 import ofdm_mimo_lab
+import LTE_TURBO
 
 BF_CORR_MAP = {"Baja (diversidad)": "low", "Alta (solo potencia)": "high"}
 
@@ -75,6 +76,11 @@ class OFDM_Simulator:
         # Laboratorio MIMO (botón propio, reutiliza la base)
         self.lab_sir_var = tk.StringVar(value="3")
 
+        # Codificación de canal Turbo LTE (botón propio, independiente)
+        self.turbo_k_var = tk.StringVar(value="256")
+        self.turbo_iter_var = tk.StringVar(value="6")
+        self.turbo_rate_var = tk.StringVar(value="1/3")
+
         self.snr_list = [0, 5, 10, 15, 20]
         self.sim_data = {}
         self._bf_base = None  # datos base de la última simulación principal
@@ -87,9 +93,37 @@ class OFDM_Simulator:
     # ==============================================================
 
     def setup_ui(self):
-        # --- Panel lateral de controles ---
-        ctrl_frame = ttk.LabelFrame(self.root, text=" Configuración de Parámetros ")
-        ctrl_frame.pack(side="left", fill="y", padx=8, pady=8)
+        # --- Panel lateral de controles con barra de scroll ---
+        # Como hay muchos controles (beamforming, MIMO, Turbo, etc.) no caben de
+        # una vez; se colocan dentro de un Canvas desplazable para poder bajar
+        # hasta el botón de simular y el resto de configuraciones.
+        ctrl_outer = ttk.Frame(self.root)
+        ctrl_outer.pack(side="left", fill="y", padx=8, pady=8)
+
+        ctrl_canvas = tk.Canvas(ctrl_outer, borderwidth=0, highlightthickness=0)
+        ctrl_scroll = ttk.Scrollbar(ctrl_outer, orient="vertical",
+                                    command=ctrl_canvas.yview)
+        ctrl_canvas.configure(yscrollcommand=ctrl_scroll.set)
+        ctrl_scroll.pack(side="right", fill="y")
+        ctrl_canvas.pack(side="left", fill="both", expand=True)
+
+        ctrl_frame = ttk.LabelFrame(ctrl_canvas, text=" Configuración de Parámetros ")
+        ctrl_canvas.create_window((0, 0), window=ctrl_frame, anchor="nw")
+
+        def _ctrl_configure(event):
+            ctrl_canvas.configure(scrollregion=ctrl_canvas.bbox("all"))
+            ctrl_canvas.configure(width=ctrl_frame.winfo_reqwidth())
+        ctrl_frame.bind("<Configure>", _ctrl_configure)
+
+        def _ctrl_wheel(event):
+            # Desplaza solo cuando el cursor está sobre el panel de control.
+            w = event.widget
+            while w is not None:
+                if w == ctrl_outer:
+                    ctrl_canvas.yview_scroll(int(-event.delta / 120), "units")
+                    return
+                w = getattr(w, "master", None)
+        ctrl_canvas.bind_all("<MouseWheel>", _ctrl_wheel)
 
         tk.Button(
             ctrl_frame, text="CARGAR IMAGEN", command=self.load_image,
@@ -132,6 +166,22 @@ class OFDM_Simulator:
         tk.Button(
             ctrl_frame, text="EJECUTAR LAB MIMO", command=self.run_mimo_lab,
             bg="#c0392b", fg="white", font=("Helvetica", 9, "bold"),
+        ).pack(pady=(2, 4), fill="x", padx=5)
+
+        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
+
+        # --- Codificación Turbo LTE (botón propio, independiente) ---
+        ttk.Label(
+            ctrl_frame, text="Turbo LTE (pestaña 12):", font=("Helvetica", 9, "bold")
+        ).pack(padx=5, anchor="w")
+        self._combo(ctrl_frame, "Bloque K:", self.turbo_k_var,
+                    ["128", "256", "512", "1024"])
+        self._combo(ctrl_frame, "Code rate:", self.turbo_rate_var,
+                    LTE_TURBO.RATE_LABELS)
+        self._row(ctrl_frame, "Iteraciones:", self.turbo_iter_var)
+        tk.Button(
+            ctrl_frame, text="EJECUTAR TURBO LTE", command=self.run_turbo,
+            bg="#117a65", fg="white", font=("Helvetica", 9, "bold"),
         ).pack(pady=(2, 4), fill="x", padx=5)
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
@@ -206,6 +256,8 @@ class OFDM_Simulator:
         self.notebook.add(self.tab10, text="10. Beamforming")
         self.tab11 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab11, text="11. Laboratorio MIMO")
+        self.tab12 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab12, text="12. Turbo LTE")
 
     # helpers para layout compacto
     def _row(self, parent, label, var):
@@ -736,6 +788,72 @@ class OFDM_Simulator:
 
         except Exception as e:
             messagebox.showerror("Error Laboratorio MIMO", str(e))
+            raise
+
+    def run_turbo(self):
+        """Ejecuta el codificador y decodificador Turbo de LTE sobre AWGN.
+
+        Compara la tasa de error del código Turbo frente a una transmisión sin
+        codificar y muestra la convergencia del decodificador iterativo. Es un
+        módulo de codificación de canal independiente de la cadena OFDM.
+        """
+        try:
+            K = int(self.turbo_k_var.get())
+            n_iter = max(1, int(self.turbo_iter_var.get()))
+            rate = self.turbo_rate_var.get()
+            if K not in LTE_TURBO.QPP_TABLE:
+                messagebox.showwarning(
+                    "Turbo LTE",
+                    f"El bloque K={K} no está en la tabla QPP de LTE. "
+                    f"Use uno de: {sorted(LTE_TURBO.QPP_TABLE)}.",
+                )
+                return
+
+            self._status(f"Turbo LTE...\nBER vs SNR para QPSK, 16QAM y 64QAM "
+                         f"(K={K}, {n_iter} iter, tasa {rate})\n"
+                         "Esto puede tardar unos segundos.")
+            qam = LTE_TURBO.run_ber_qam_raw_vs_turbo(K, [0, 3, 6, 9, 12],
+                                                     n_frames=8, n_iter=n_iter,
+                                                     rate=rate)
+            self._status("Turbo LTE: convergencia del decodificador...")
+            conv = LTE_TURBO.run_ber_vs_iterations(K, 1.8, [1, 2, 4, 6, 8],
+                                                   n_frames=12)
+
+            # Imagen transmitida con y sin Turbo (usa la imagen cargada si la hay)
+            turbo_img = None
+            mod = self.mod_var.get()
+            M = MOD_MAP[mod]
+            snr_img = {"QPSK": 4, "16QAM": 7, "64QAM": 11}.get(mod, 7)
+            img_src = None
+            if self._bf_base and self._bf_base.get("img_arr") is not None:
+                img_src = self._bf_base["img_arr"]
+            elif self.img_path.get():
+                try:
+                    im = Image.open(self.img_path.get()).convert("L")
+                    img_src = np.array(im, dtype=np.uint8)
+                except Exception:
+                    img_src = None
+            if img_src is not None:
+                self._status(f"Turbo LTE: imagen con y sin codificación a {snr_img} dB...")
+                turbo_img = LTE_TURBO.transmit_image_turbo(
+                    img_src, M, snr_img, n_iter=n_iter, K=K, rate=rate,
+                )
+
+            self.sim_data["turbo_data"] = {
+                "qam": qam, "conv": conv, "K": K, "n_iter": n_iter,
+                "rate": qam["rate"], "rate_label": rate,
+                "img": turbo_img, "mod": mod,
+            }
+            self._render_tab12(self.sim_data)
+            self.notebook.select(self.tab12)
+            self._status(
+                f"Turbo LTE listo.\nK={K}  |  {n_iter} iteraciones  |  "
+                f"tasa {rate} ({qam['rate']:.3f})\n"
+                f"PCCC con 2 RSC de 8 estados, QPSK/16QAM/64QAM"
+            )
+
+        except Exception as e:
+            messagebox.showerror("Error Turbo LTE", str(e))
             raise
 
     # ==============================================================
@@ -1357,6 +1475,77 @@ class OFDM_Simulator:
             )
         figB.subplots_adjust(left=0.02, right=0.99, top=0.80, bottom=0.16, wspace=0.12)
         self._embed(figB, self.tab11)
+
+    # --- Tab 12: Codificación de canal Turbo LTE ---
+
+    def _render_tab12(self, d):
+        self._clear_tab(self.tab12)
+        data = d.get("turbo_data")
+
+        if not data:
+            tk.Label(
+                self.tab12,
+                text="Seleccione el bloque K y las iteraciones, y pulse "
+                     "'EJECUTAR TURBO LTE'.\nCodificador PCCC con dos RSC de 8 "
+                     "estados, entrelazador QPP y decodificador iterativo "
+                     "Max-Log-MAP\nsobre canal AWGN. Compara la tasa de error "
+                     "frente a una transmisión sin codificar.",
+                font=("Consolas", 11), fg="#555", pady=40, justify="left",
+            ).pack(fill="both", expand=True)
+            return
+
+        info = (
+            f"  Codificación de canal Turbo LTE  |  PCCC con 2 RSC de 8 estados  |  "
+            f"Entrelazador QPP  |  Bloque K={data['K']}  |  "
+            f"{data['n_iter']} iteraciones  |  "
+            f"Tasa {data.get('rate_label', '1/3')} ({data['rate']:.3f})"
+        )
+        tk.Label(
+            self.tab12, text=info, font=("Consolas", 9, "bold"),
+            bg="#0e6655", fg="white", relief="groove", padx=8, pady=4,
+        ).pack(fill="x", padx=6, pady=(5, 0))
+
+        img = data.get("img")
+        if img is None:
+            # Solo curvas: comparativa por modulación y convergencia
+            fig = plt.figure(figsize=(16, 6.5))
+            gs = fig.add_gridspec(1, 3)
+            fig.suptitle(
+                "Código Turbo LTE: ganancia de codificación por modulación y convergencia",
+                fontsize=12, fontweight="bold",
+            )
+            LTE_TURBO.plot_ber_qam_turbo(fig.add_subplot(gs[0, 0:2]), data["qam"])
+            LTE_TURBO.plot_ber_iterations(fig.add_subplot(gs[0, 2]), data["conv"])
+            fig.subplots_adjust(left=0.06, right=0.98, top=0.88, bottom=0.11, wspace=0.28)
+            self._embed(fig, self.tab12)
+            return
+
+        # Dos filas: curvas (más grandes) arriba, imágenes con y sin Turbo abajo
+        fig = plt.figure(figsize=(17, 11))
+        gs = fig.add_gridspec(2, 3, height_ratios=[1.45, 0.85])
+        fig.suptitle(
+            "Código Turbo LTE: ganancia por modulación, convergencia e imagen recuperada",
+            fontsize=13, fontweight="bold", y=0.985,
+        )
+        LTE_TURBO.plot_ber_qam_turbo(fig.add_subplot(gs[0, 0:2]), data["qam"])
+        LTE_TURBO.plot_ber_iterations(fig.add_subplot(gs[0, 2]), data["conv"])
+
+        ofdm_utils.plot_image_panel(
+            fig.add_subplot(gs[1, 0]), img["img_orig"], "Original (Referencia)"
+        )
+        ofdm_utils.plot_image_panel(
+            fig.add_subplot(gs[1, 1]), img["img_raw"],
+            f"Sin codificar ({data['mod']}, {img['snr_db']} dB)",
+            subtitle=f"PSNR = {img['psnr_raw']:.2f} dB\nBER = {img['ber_raw']:.2e}",
+        )
+        ofdm_utils.plot_image_panel(
+            fig.add_subplot(gs[1, 2]), img["img_turbo"],
+            f"Con Turbo LTE ({data['mod']}, {img['snr_db']} dB)",
+            subtitle=f"PSNR = {img['psnr_turbo']:.2f} dB\nBER = {img['ber_turbo']:.2e}",
+        )
+        fig.subplots_adjust(left=0.06, right=0.98, top=0.91, bottom=0.05,
+                            hspace=0.42, wspace=0.26)
+        self._embed(fig, self.tab12)
 
 
 if __name__ == "__main__":
