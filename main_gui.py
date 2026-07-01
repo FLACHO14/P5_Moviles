@@ -1475,15 +1475,18 @@ class OFDM_Simulator:
             f"(la diversidad espacial preserva mejor la estructura)",
             fontsize=11, fontweight="bold",
         )
-        modes = ["SISO", "SIMO-MRC", "MISO-SFBC", "Beamforming"]
+        modes = ["SISO", "SIMO-MRC", "MISO-SFBC", "Beamforming", "MIMO"]
         gs = figB.add_gridspec(1, 1 + len(modes))
         ofdm_utils.plot_image_panel(
             figB.add_subplot(gs[0, 0]), img["img_orig"], "Original (Referencia)"
         )
         for i, mode in enumerate(modes):
-            m = img[mode]
+            m = img.get(mode)
+            if m is None:
+                continue
+            label = "MIMO (Mux-Espacial)" if mode == "MIMO" else mode
             ofdm_utils.plot_image_panel(
-                figB.add_subplot(gs[0, 1 + i]), m["img"], mode,
+                figB.add_subplot(gs[0, 1 + i]), m["img"], label,
                 subtitle=f"PSNR = {m['psnr']:.2f} dB\nBER = {m['ber']:.2e}",
             )
         figB.subplots_adjust(left=0.02, right=0.99, top=0.80, bottom=0.16, wspace=0.12)

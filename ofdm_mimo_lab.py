@@ -464,6 +464,29 @@ def transmit_image_all_modes(
     Xb, _ = ofdm_rx.equalize_with_pilots(Yb, sc_map, pilot_value, Nfft)
     store("Beamforming", ofdm_rx.qam_demod(Xb, M))
 
+    # MIMO (multiplexación espacial 2x2 con receptor Zero-Forcing)
+    tx1m, tx2m, _ = spatial_mux_tx(bits_in, Nfft, cp_len, sc_map, pilot_value, M)
+    ch_mux = [generate_correlated_channels(2, profile, taps_L, correlation) for _ in range(2)]
+    len_sig = len(tx1m)
+    snr_lin = 10 ** (snr_db / 10)
+    rx_mux = []
+    for r in range(2):
+        y = np.convolve(tx1m, ch_mux[0][r], mode="full")[:len_sig] + \
+            np.convolve(tx2m, ch_mux[1][r], mode="full")[:len_sig]
+        y = ofdm_channel.apply_doppler(y, velocity, fs)
+        sp = np.mean(np.abs(y) ** 2) or 1.0
+        noise = (np.random.randn(len_sig) + 1j * np.random.randn(len_sig)) * \
+            np.sqrt((sp / snr_lin) / 2)
+        rx_mux.append(y + noise)
+    Y0m = ofdm_rx.ofdm_rx_block(rx_mux[0], Nfft, cp_len)
+    Y1m = ofdm_rx.ofdm_rx_block(rx_mux[1], Nfft, cp_len)
+    Hm = [[None, None], [None, None]]
+    Hm[0][0] = ofdm_rx.estimate_channel_from_pilots(Y0m, sc_a1, pilot_value, Nfft)
+    Hm[0][1] = ofdm_rx.estimate_channel_from_pilots(Y1m, sc_a1, pilot_value, Nfft)
+    Hm[1][0] = ofdm_rx.estimate_channel_from_pilots(Y0m, sc_a2, pilot_value, Nfft)
+    Hm[1][1] = ofdm_rx.estimate_channel_from_pilots(Y1m, sc_a2, pilot_value, Nfft)
+    store("MIMO", spatial_mux_zf_decode(Y0m, Y1m, Hm, sc_map, M))
+
     return out
 
 
