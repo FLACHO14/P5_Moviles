@@ -809,21 +809,32 @@ class OFDM_Simulator:
                 )
                 return
 
+            mod = self.mod_var.get()
+            M = MOD_MAP[mod]
+
             self._status(f"Turbo LTE...\nBER vs SNR para QPSK, 16QAM y 64QAM "
                          f"(K={K}, {n_iter} iter, tasa {rate})\n"
                          "Esto puede tardar unos segundos.")
             qam = LTE_TURBO.run_ber_qam_raw_vs_turbo(K, [0, 3, 6, 9, 12],
                                                      n_frames=8, n_iter=n_iter,
                                                      rate=rate)
+
+            # Comparación con el código convolucional. Los rangos de SNR se
+            # eligen para que se vea la caída de la curva del Turbo, que a mayor
+            # SNR se anula (waterfall).
+            codes_snr = {"QPSK": [-2, -1, 0, 1, 2], "16QAM": [2, 3, 4, 5, 6],
+                         "64QAM": [6, 8, 10, 12, 14]}.get(mod, [2, 3, 4, 5, 6])
+            self._status("Turbo LTE: comparación con código convolucional...")
+            codes = LTE_TURBO.run_ber_codes(K, codes_snr, n_frames=6, M=M,
+                                            n_iter=n_iter, rate=rate)
+
             self._status("Turbo LTE: convergencia del decodificador...")
             conv = LTE_TURBO.run_ber_vs_iterations(K, 1.8, [1, 2, 4, 6, 8],
                                                    n_frames=12)
 
-            # Imagen transmitida con y sin Turbo (usa la imagen cargada si la hay)
+            # Imagen transmitida sin codificar, con convolucional y con Turbo
             turbo_img = None
-            mod = self.mod_var.get()
-            M = MOD_MAP[mod]
-            snr_img = {"QPSK": 4, "16QAM": 7, "64QAM": 11}.get(mod, 7)
+            snr_img = {"QPSK": 0, "16QAM": 4, "64QAM": 8}.get(mod, 4)
             img_src = None
             if self._bf_base and self._bf_base.get("img_arr") is not None:
                 img_src = self._bf_base["img_arr"]
@@ -834,13 +845,15 @@ class OFDM_Simulator:
                 except Exception:
                     img_src = None
             if img_src is not None:
-                self._status(f"Turbo LTE: imagen con y sin codificación a {snr_img} dB...")
+                self._status(f"Turbo LTE: imagen (sin cod., convolucional y Turbo) "
+                             f"a {snr_img} dB...")
                 turbo_img = LTE_TURBO.transmit_image_turbo(
                     img_src, M, snr_img, n_iter=n_iter, K=K, rate=rate,
                 )
 
             self.sim_data["turbo_data"] = {
-                "qam": qam, "conv": conv, "K": K, "n_iter": n_iter,
+                "qam": qam, "codes": codes, "conv": conv,
+                "K": K, "n_iter": n_iter,
                 "rate": qam["rate"], "rate_label": rate,
                 "img": turbo_img, "mod": mod,
             }
@@ -1505,46 +1518,53 @@ class OFDM_Simulator:
             bg="#0e6655", fg="white", relief="groove", padx=8, pady=4,
         ).pack(fill="x", padx=6, pady=(5, 0))
 
+        mod = data["mod"]
         img = data.get("img")
-        if img is None:
-            # Solo curvas: comparativa por modulación y convergencia
-            fig = plt.figure(figsize=(16, 6.5))
-            gs = fig.add_gridspec(1, 3)
-            fig.suptitle(
-                "Código Turbo LTE: ganancia de codificación por modulación y convergencia",
-                fontsize=12, fontweight="bold",
-            )
-            LTE_TURBO.plot_ber_qam_turbo(fig.add_subplot(gs[0, 0:2]), data["qam"])
-            LTE_TURBO.plot_ber_iterations(fig.add_subplot(gs[0, 2]), data["conv"])
-            fig.subplots_adjust(left=0.06, right=0.98, top=0.88, bottom=0.11, wspace=0.28)
-            self._embed(fig, self.tab12)
-            return
 
-        # Dos filas: curvas (más grandes) arriba, imágenes con y sin Turbo abajo
-        fig = plt.figure(figsize=(17, 11))
-        gs = fig.add_gridspec(2, 3, height_ratios=[1.45, 0.85])
+        # Figura con tres filas sobre una rejilla de 12 columnas:
+        #  fila 1: BER por modulación (turbo vs sin codificar) + convergencia
+        #  fila 2: comparación con convolucional + tiempo de procesamiento
+        #  fila 3: imagen recuperada por cada esquema
+        n_rows = 3 if img is not None else 2
+        heights = [1.1, 1.0, 1.0] if img is not None else [1.1, 1.0]
+        # constrained_layout evita que los ejes de subgráficas se solapen.
+        fig = plt.figure(figsize=(18, 5.0 * n_rows), constrained_layout=True)
+        gs = fig.add_gridspec(n_rows, 12, height_ratios=heights)
         fig.suptitle(
-            "Código Turbo LTE: ganancia por modulación, convergencia e imagen recuperada",
-            fontsize=13, fontweight="bold", y=0.985,
+            "Código Turbo LTE: comparación con código convolucional, "
+            "tiempo de procesamiento e imagen recuperada",
+            fontsize=13, fontweight="bold",
         )
-        LTE_TURBO.plot_ber_qam_turbo(fig.add_subplot(gs[0, 0:2]), data["qam"])
-        LTE_TURBO.plot_ber_iterations(fig.add_subplot(gs[0, 2]), data["conv"])
 
-        ofdm_utils.plot_image_panel(
-            fig.add_subplot(gs[1, 0]), img["img_orig"], "Original (Referencia)"
-        )
-        ofdm_utils.plot_image_panel(
-            fig.add_subplot(gs[1, 1]), img["img_raw"],
-            f"Sin codificar ({data['mod']}, {img['snr_db']} dB)",
-            subtitle=f"PSNR = {img['psnr_raw']:.2f} dB\nBER = {img['ber_raw']:.2e}",
-        )
-        ofdm_utils.plot_image_panel(
-            fig.add_subplot(gs[1, 2]), img["img_turbo"],
-            f"Con Turbo LTE ({data['mod']}, {img['snr_db']} dB)",
-            subtitle=f"PSNR = {img['psnr_turbo']:.2f} dB\nBER = {img['ber_turbo']:.2e}",
-        )
-        fig.subplots_adjust(left=0.06, right=0.98, top=0.91, bottom=0.05,
-                            hspace=0.42, wspace=0.26)
+        # Fila 1: BER por modulación + convergencia
+        LTE_TURBO.plot_ber_qam_turbo(fig.add_subplot(gs[0, 0:7]), data["qam"])
+        LTE_TURBO.plot_ber_iterations(fig.add_subplot(gs[0, 7:12]), data["conv"])
+
+        # Fila 2: Sin codificar vs Convolucional vs Turbo + tiempo de procesamiento
+        LTE_TURBO.plot_codes_ber(fig.add_subplot(gs[1, 0:7]), data["codes"])
+        LTE_TURBO.plot_codes_time(fig.add_subplot(gs[1, 7:12]), data["codes"])
+
+        # Fila 3: imágenes recuperadas por cada esquema
+        if img is not None:
+            ofdm_utils.plot_image_panel(
+                fig.add_subplot(gs[2, 0:3]), img["img_orig"], "Original (Referencia)"
+            )
+            ofdm_utils.plot_image_panel(
+                fig.add_subplot(gs[2, 3:6]), img["img_raw"],
+                f"Sin codificar ({mod}, {img['snr_db']} dB)",
+                subtitle=f"PSNR = {img['psnr_raw']:.2f} dB\nBER = {img['ber_raw']:.2e}",
+            )
+            ofdm_utils.plot_image_panel(
+                fig.add_subplot(gs[2, 6:9]), img["img_conv"],
+                f"Convolucional ({mod}, {img['snr_db']} dB)",
+                subtitle=f"PSNR = {img['psnr_conv']:.2f} dB\nBER = {img['ber_conv']:.2e}",
+            )
+            ofdm_utils.plot_image_panel(
+                fig.add_subplot(gs[2, 9:12]), img["img_turbo"],
+                f"Turbo LTE ({mod}, {img['snr_db']} dB)",
+                subtitle=f"PSNR = {img['psnr_turbo']:.2f} dB\nBER = {img['ber_turbo']:.2e}",
+            )
+
         self._embed(fig, self.tab12)
 
 

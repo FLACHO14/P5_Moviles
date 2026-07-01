@@ -220,17 +220,23 @@ def turbo_decode(Lc_sys, Lc_par1, Lc_par2,
     sys2 = np.concatenate([Lc_sys[interleaver], Lc_tail2_sys])
     par2 = np.concatenate([Lc_par2, Lc_tail2_par])
 
+    # Factor de escala de la información extrínseca. El Max-Log-MAP tiende a
+    # sobreestimar la fiabilidad; escalar la extrínseca por un factor menor que
+    # uno recupera buena parte de la pérdida respecto al Log-MAP y mejora el
+    # umbral de convergencia del código.
+    beta = 0.75
+
     La1 = np.zeros(K + 3)
     Le2_info = np.zeros(K)
 
     for _ in range(n_iter):
-        La1[:K] = Le2_info[deint]
+        La1[:K] = beta * Le2_info[deint]
         La1[K:] = 0.0
         Le1 = siso_maxlogmap(sys1, par1, La1)
         Le1_info = Le1[:K]
 
         La2 = np.zeros(K + 3)
-        La2[:K] = Le1_info[interleaver]
+        La2[:K] = beta * Le1_info[interleaver]
         Le2 = siso_maxlogmap(sys2, par2, La2)
         Le2_info = Le2[:K]
 
@@ -541,10 +547,11 @@ def transmit_image_turbo(img_arr, M, snr_db, n_iter=6, K=256, rate="1/3"):
     import ofdm_utils
     from ofdm_rx import qam_demod
 
-    # Redimensiona a un tamaño manejable para que la demostración sea rápida,
-    # ya que el decodificador Turbo procesa la imagen bloque a bloque.
+    # Se usa la misma imagen cargada por el usuario. Se redimensiona a un lado
+    # máximo razonable para conservar buena calidad sin que la decodificación
+    # bloque a bloque tarde demasiado.
     img_arr = np.asarray(img_arr, dtype=np.uint8)
-    max_side = 64
+    max_side = 96
     if max(img_arr.shape) > max_side:
         try:
             from PIL import Image
@@ -563,6 +570,7 @@ def transmit_image_turbo(img_arr, M, snr_db, n_iter=6, K=256, rate="1/3"):
     N0 = 10 ** (-snr_db / 10.0)
     sigma = np.sqrt(N0 / 2.0)
     inter = qpp_interleaver(K)
+    m1, m2 = rate_masks(K, rate)
 
     # --- Sin codificar ---
     pad = (-n_bits) % kbits
@@ -571,50 +579,255 @@ def transmit_image_turbo(img_arr, M, snr_db, n_iter=6, K=256, rate="1/3"):
     r = sym + sigma * (np.random.randn(len(sym)) + 1j * np.random.randn(len(sym)))
     bits_raw = qam_demod(r, M)[:n_bits]
 
-    # --- Con Turbo (bloque a bloque, tasa configurable por puncturing) ---
-    m1, m2 = rate_masks(K, rate)
+    # --- Códigos de canal, bloque a bloque ---
     n_blocks = int(np.ceil(n_bits / K))
-    bits_turbo = np.zeros(n_blocks * K, dtype=np.uint8)
     src = np.pad(bits, (0, n_blocks * K - n_bits)) if n_blocks * K > n_bits else bits
+    bits_conv = np.zeros(n_blocks * K, dtype=np.uint8)
+    bits_turbo = np.zeros(n_blocks * K, dtype=np.uint8)
     for bidx in range(n_blocks):
         blk = src[bidx * K:(bidx + 1) * K]
+        bits_conv[bidx * K:(bidx + 1) * K] = _conv_chain_qam(blk, M, N0, sigma)
         bits_turbo[bidx * K:(bidx + 1) * K] = _turbo_chain_qam(
             blk, M, N0, sigma, m1, m2, inter, n_iter)
+    bits_conv = bits_conv[:n_bits]
     bits_turbo = bits_turbo[:n_bits]
 
     cap = ((n_bits + 7) // 8) * 8
     img_raw = ofdm_utils._bits_to_image(bits_raw, n_bits, cap, img_arr.shape)
+    img_conv = ofdm_utils._bits_to_image(bits_conv, n_bits, cap, img_arr.shape)
     img_tur = ofdm_utils._bits_to_image(bits_turbo, n_bits, cap, img_arr.shape)
     mse_r, psnr_r = ofdm_utils._img_metrics(img_arr, img_raw)
+    mse_c, psnr_c = ofdm_utils._img_metrics(img_arr, img_conv)
     mse_t, psnr_t = ofdm_utils._img_metrics(img_arr, img_tur)
     ber_r = float(np.mean(bits_raw[:n_bits] != bits[:n_bits]))
+    ber_c = float(np.mean(bits_conv[:n_bits] != bits[:n_bits]))
     ber_t = float(np.mean(bits_turbo[:n_bits] != bits[:n_bits]))
     return {
-        "img_orig": img_arr, "img_raw": img_raw, "img_turbo": img_tur,
-        "psnr_raw": psnr_r, "psnr_turbo": psnr_t,
-        "ber_raw": ber_r, "ber_turbo": ber_t,
+        "img_orig": img_arr, "img_raw": img_raw, "img_conv": img_conv,
+        "img_turbo": img_tur,
+        "psnr_raw": psnr_r, "psnr_conv": psnr_c, "psnr_turbo": psnr_t,
+        "ber_raw": ber_r, "ber_conv": ber_c, "ber_turbo": ber_t,
         "snr_db": snr_db, "M": M,
     }
 
 
+# ===================================================================
+# Código convolucional (referencia de comparación) con Viterbi suave
+# ===================================================================
+# Código convolucional de referencia: longitud de restricción 4 (8 estados),
+# tasa 1/3, polinomios generadores 13, 15 y 17 en octal. Es el tipo de código
+# que LTE emplea en los canales de control; aquí sirve para comparar su
+# desempeño con el código Turbo, más potente por su decodificación iterativa.
+
+CONV_K = 4
+CONV_NSTATES = 1 << (CONV_K - 1)   # 8 estados
+CONV_GENS = [0o13, 0o15, 0o17]     # generadores octales, tasa 1/3
+
+
+def _build_conv_trellis():
+    ns = np.zeros((CONV_NSTATES, 2), dtype=int)
+    out = np.zeros((CONV_NSTATES, 2, 3), dtype=int)
+    for s in range(CONV_NSTATES):
+        for u in (0, 1):
+            reg = (u << (CONV_K - 1)) | s
+            for gi, g in enumerate(CONV_GENS):
+                out[s, u, gi] = bin(reg & g).count("1") & 1
+            ns[s, u] = reg >> 1
+    return ns, out
+
+
+CONV_NS, CONV_OUT = _build_conv_trellis()
+_CONV_XOUT = 1.0 - 2.0 * CONV_OUT  # símbolos +/-1 de la salida por (estado, entrada)
+
+
+def conv_encode(bits):
+    """Codifica una secuencia con el código convolucional de tasa 1/3.
+
+    Añade bits de cola para terminar el trellis en el estado cero.
+    """
+    b = np.concatenate([np.asarray(bits, np.uint8),
+                        np.zeros(CONV_K - 1, dtype=np.uint8)])
+    s = 0
+    coded = np.zeros(len(b) * 3, dtype=np.uint8)
+    for i, u in enumerate(b):
+        coded[3 * i:3 * i + 3] = CONV_OUT[s, u]
+        s = CONV_NS[s, u]
+    return coded
+
+
+def viterbi_soft_decode(llr, n_info):
+    """Decodificador de Viterbi de decisión blanda para el código convolucional.
+
+    Recorre el trellis maximizando la correlación entre las relaciones
+    logarítmicas de verosimilitud recibidas y las salidas esperadas, y realiza
+    el rastreo hacia atrás desde el estado cero de terminación.
+    """
+    n_stages = n_info + CONV_K - 1
+    L = np.asarray(llr[:3 * n_stages], dtype=float).reshape(n_stages, 3)
+    NEG = -1e12
+    pm = np.full(CONV_NSTATES, NEG); pm[0] = 0.0
+    surv_u = np.zeros((n_stages, CONV_NSTATES), dtype=np.int8)
+    surv_s = np.zeros((n_stages, CONV_NSTATES), dtype=np.int16)
+
+    for k in range(n_stages):
+        bm = _CONV_XOUT @ L[k]         # (8, 2) métrica de rama por estado y entrada
+        cand = pm[:, None] + bm        # (8, 2)
+        newpm = np.full(CONV_NSTATES, NEG)
+        for u in (0, 1):
+            dest = CONV_NS[:, u]
+            cu = cand[:, u]
+            for s in range(CONV_NSTATES):
+                d = dest[s]
+                if cu[s] > newpm[d]:
+                    newpm[d] = cu[s]
+                    surv_u[k, d] = u
+                    surv_s[k, d] = s
+        pm = newpm
+
+    s = 0
+    dec = np.zeros(n_stages, dtype=np.uint8)
+    for k in range(n_stages - 1, -1, -1):
+        dec[k] = surv_u[k, s]
+        s = surv_s[k, s]
+    return dec[:n_info]
+
+
+def _conv_chain_qam(bits, M, N0, sigma):
+    """Cadena completa del código convolucional sobre QAM y AWGN."""
+    K = len(bits)
+    kbits = int(np.log2(M))
+    coded = conv_encode(bits)
+    pc = (-len(coded)) % kbits
+    coded_p = np.pad(coded, (0, pc)) if pc else coded
+    sym = _qam_mod(coded_p, M)
+    rc = sym + sigma * (np.random.randn(len(sym)) + 1j * np.random.randn(len(sym)))
+    llr = qam_soft_demap(rc, M, N0)[:len(coded)]
+    return viterbi_soft_decode(llr, K)
+
+
+# ===================================================================
+# Comparación Sin codificar vs Convolucional vs Turbo
+# ===================================================================
+
+def run_ber_codes(K, snr_list, n_frames, M, n_iter=6, rate="1/3"):
+    """BER y tiempo de procesamiento de tres esquemas para una modulación.
+
+    Compara la transmisión sin codificar, el código convolucional y el código
+    Turbo, y mide el tiempo de procesamiento de cada uno por bloque. El Turbo
+    ofrece la menor tasa de error a costa de un mayor tiempo de decodificación.
+    """
+    import time
+    from ofdm_rx import qam_demod
+    inter = qpp_interleaver(K)
+    m1, m2 = rate_masks(K, rate)
+    names = ["Sin codificar", "Convolucional", "Turbo"]
+    res = {"snr": list(snr_list), "M": M,
+           "ber": {n: [] for n in names}, "time": {n: [] for n in names}}
+
+    for snr_db in snr_list:
+        N0 = 10 ** (-snr_db / 10.0)
+        sigma = np.sqrt(N0 / 2.0)
+        kbits = int(np.log2(M))
+        acc = {n: [] for n in names}
+        tacc = {n: 0.0 for n in names}
+        for _ in range(n_frames):
+            bits = np.random.randint(0, 2, K).astype(np.uint8)
+
+            t0 = time.perf_counter()
+            pad = (-K) % kbits
+            bp = np.pad(bits, (0, pad)) if pad else bits
+            sym = _qam_mod(bp, M)
+            r = sym + sigma * (np.random.randn(len(sym)) + 1j * np.random.randn(len(sym)))
+            bhat = qam_demod(r, M)[:K]
+            acc["Sin codificar"].append(np.mean(bhat != bits))
+            tacc["Sin codificar"] += time.perf_counter() - t0
+
+            t0 = time.perf_counter()
+            dec = _conv_chain_qam(bits, M, N0, sigma)
+            acc["Convolucional"].append(np.mean(dec != bits))
+            tacc["Convolucional"] += time.perf_counter() - t0
+
+            t0 = time.perf_counter()
+            dec = _turbo_chain_qam(bits, M, N0, sigma, m1, m2, inter, n_iter)
+            acc["Turbo"].append(np.mean(dec != bits))
+            tacc["Turbo"] += time.perf_counter() - t0
+
+        for n in names:
+            res["ber"][n].append(float(np.mean(acc[n])))
+            res["time"][n].append(tacc[n] / n_frames * 1e3)  # ms por bloque
+    return res
+
+
 _QAM_COLORS = {"QPSK": "#2741d6", "16QAM": "#1e8a2e", "64QAM": "#d62728"}
+_CODE_COLORS = {"Sin codificar": "#7f8c8d", "Convolucional": "#2980b9", "Turbo": "#c0392b"}
+_CODE_MARK = {"Sin codificar": "o", "Convolucional": "^", "Turbo": "s"}
+_MOD_NAME = {4: "QPSK", 16: "16QAM", 64: "64QAM"}
 
 
 def plot_ber_qam_turbo(ax, res):
-    """BER vs SNR de QPSK, 16QAM y 64QAM, sin codificar (Raw) y con Turbo."""
+    """BER vs SNR de QPSK, 16QAM y 64QAM, sin codificar y con Turbo."""
     snr = np.array(res["snr"])
     for name in ("QPSK", "16QAM", "64QAM"):
         c = _QAM_COLORS[name]
         raw = np.maximum(np.array(res["raw"][name]), 1e-7)
         tur = np.maximum(np.array(res["turbo"][name]), 1e-7)
         ax.semilogy(snr, raw, "o--", color=c, alpha=0.7, markersize=5,
-                    label=f"{name} Raw")
+                    label=f"{name} Sin cod.")
         ax.semilogy(snr, tur, "s-", color=c, linewidth=2, markersize=5,
                     label=f"{name} Turbo")
     ax.set_title("BER vs SNR — QAM sin codificar frente a Turbo LTE")
     ax.set_xlabel("SNR (dB)"); ax.set_ylabel("BER")
     ax.set_ylim(1e-5, 1.0)
-    # Leyenda discreta en la esquina inferior izquierda (zona libre de curvas)
     ax.legend(fontsize=7, ncol=2, loc="lower left", framealpha=0.85,
               handlelength=1.6, columnspacing=1.0, borderpad=0.4)
     ax.grid(True, which="both", alpha=0.3)
+
+
+def plot_codes_ber(ax, res):
+    """BER vs SNR comparando sin codificar, convolucional y Turbo.
+
+    Los valores de BER nula se dibujan cerca del piso del eje para que la
+    curva del Turbo, que suele anularse, siga siendo visible.
+    """
+    snr = np.array(res["snr"])
+    floor = 1.5e-6
+    for name in ("Sin codificar", "Convolucional", "Turbo"):
+        raw = np.array(res["ber"][name])
+        b = np.where(raw > 0, raw, floor)
+        ax.semilogy(snr, b, marker=_CODE_MARK[name], color=_CODE_COLORS[name],
+                    label=name, linewidth=2, markersize=6)
+    ax.set_title(f"BER vs SNR — Sin codificar, Convolucional y Turbo "
+                 f"({_MOD_NAME.get(res['M'], '')})")
+    ax.set_xlabel("SNR (dB)"); ax.set_ylabel("BER")
+    ax.set_ylim(1e-6, 1.0)
+    ax.legend(fontsize=8, loc="upper right", framealpha=0.9)
+    ax.grid(True, which="both", alpha=0.3)
+
+
+def plot_codes_time(ax, res):
+    """Tiempo de procesamiento medio por bloque de cada esquema.
+
+    Se representa como un diagrama de barras con el valor sobre cada barra,
+    ya que el tiempo apenas depende de la relación señal a ruido y lo relevante
+    es comparar el costo de cada esquema. La escala es logarítmica porque los
+    tiempos difieren en varios órdenes de magnitud: el decodificador Turbo es
+    mucho más costoso que el Viterbi del convolucional y que no codificar.
+    """
+    names = ["Sin codificar", "Convolucional", "Turbo"]
+    avg = [max(float(np.mean(res["time"][n])), 1e-3) for n in names]
+    colors = [_CODE_COLORS[n] for n in names]
+    bars = ax.bar(names, avg, color=colors, alpha=0.85, width=0.6)
+    ax.set_yscale("log")
+    ax.set_ylabel("Tiempo por bloque (ms)")
+    ax.set_title("Tiempo de procesamiento (promedio)")
+    ax.set_ylim(min(avg) * 0.4, max(avg) * 3)
+    for b, v in zip(bars, avg):
+        ax.text(b.get_x() + b.get_width() / 2, v * 1.1, f"{v:.2f} ms",
+                ha="center", va="bottom", fontsize=9, fontweight="bold")
+    # Relación Turbo/Convolucional como referencia de costo
+    ratio = avg[2] / avg[1] if avg[1] > 0 else 0
+    ax.text(0.5, 0.02, f"Turbo cuesta ~{ratio:.0f}x más que el convolucional",
+            transform=ax.transAxes, ha="center", va="bottom", fontsize=8,
+            bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.9))
+    ax.grid(True, axis="y", which="both", alpha=0.3)
+    ax.tick_params(axis="x", labelsize=8)

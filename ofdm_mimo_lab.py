@@ -267,15 +267,15 @@ def run_spatial_mux(bits_in, Nfft, cp_len, sc_map, pilot_value, M,
 # Análisis comparativo unificado
 # ===================================================================
 
-ALL_TECHNIQUES = ["SISO", "SIMO-MRC", "SIMO-IRC", "MISO-SFBC", "Beamforming", "Mux-Espacial"]
+ALL_TECHNIQUES = ["SISO", "SIMO-MRC", "SIMO-IRC", "MISO-SFBC", "Beamforming", "MIMO"]
 
 LAB_COLORS = {
     "SISO": "#7f8c8d", "SIMO-MRC": "#2ecc71", "SIMO-IRC": "#16a085",
-    "MISO-SFBC": "#e67e22", "Beamforming": "#8e44ad", "Mux-Espacial": "#c0392b",
+    "MISO-SFBC": "#e67e22", "Beamforming": "#8e44ad", "MIMO": "#c0392b",
 }
 LAB_MARKERS = {
     "SISO": "o", "SIMO-MRC": "s", "SIMO-IRC": "v",
-    "MISO-SFBC": "D", "Beamforming": "^", "Mux-Espacial": "P",
+    "MISO-SFBC": "D", "Beamforming": "^", "MIMO": "P",
 }
 
 
