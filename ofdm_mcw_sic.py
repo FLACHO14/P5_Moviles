@@ -175,6 +175,12 @@ def _run_block_scw(H, snr_db, M=16):
 # Simulación: throughput y BER por capa
 # ===================================================================
 
+def _mode_mod(values):
+    """Modulación más frecuente de una lista (la mediana daría valores inválidos)."""
+    vals = list(values)
+    return int(max(set(vals), key=vals.count))
+
+
 def run_mcw_vs_scw(snr_list, N=2, n_frames=12, n_sc=300, T1=15.0, T2=8.0, M_scw=16):
     """Throughput y BER por capa de MCW adaptativo frente a SCW fijo.
 
@@ -228,11 +234,11 @@ def run_mcw_vs_scw(snr_list, N=2, n_frames=12, n_sc=300, T1=15.0, T2=8.0, M_scw=
         res["ber_first"].append(bf / n_frames)
         res["ber_last_sic"].append(bls / n_frames)
         res["ber_last_mmse"].append(blm / n_frames)
-        res["mod_first"].append(int(np.median(mf_acc)))
-        res["mod_last"].append(int(np.median(ml_acc)))
+        res["mod_first"].append(_mode_mod(mf_acc))
+        res["mod_last"].append(_mode_mod(ml_acc))
         res["sim_time_ms"].append((time.perf_counter() - t0) * 1e3)
         res["ber_layers"].append((ber_lay / n_frames).tolist())
-        res["mod_layers"].append([int(np.median(m)) for m in mod_lay])
+        res["mod_layers"].append([_mode_mod(m) for m in mod_lay])
     return res
 
 
@@ -486,11 +492,21 @@ _MODCOLOR = {4: "#2980b9", 16: "#e67e22", 64: "#c0392b"}
 
 
 def _pick_snr_index(res):
-    """Índice de SNR donde las capas usan modulaciones distintas (o la mayor)."""
-    for i in range(len(res["snr"]) - 1, -1, -1):
-        if len(set(res["mod_layers"][i])) > 1:
-            return i
-    return len(res["snr"]) - 1
+    """Índice de SNR con mayor variedad de modulaciones entre las capas.
+
+    Interesa el punto de operación donde conviven las tres modulaciones
+    (64QAM en los modos fuertes y QPSK en los débiles), que es donde mejor se
+    aprecia la adaptación de enlace del MCW. Se prioriza el mayor número de
+    modulaciones distintas y, en empate, que coexistan la más alta y la más
+    baja; como último criterio se prefiere la SNR más baja del empate.
+    """
+    mods = res["mod_layers"]
+    n = len(mods)
+    def key(i):
+        s = set(mods[i])
+        extremes = (64 in s) and (4 in s)   # coexisten 64QAM y QPSK
+        return (len(s), extremes, -i)       # -i: preferir SNR más baja en empate
+    return max(range(n), key=key)
 
 
 def plot_per_antenna(ax, res, snr_idx=None):
@@ -499,13 +515,15 @@ def plot_per_antenna(ax, res, snr_idx=None):
         snr_idx = _pick_snr_index(res)
     N = res["N"]
     mods = res["mod_layers"][snr_idx]
-    bers = np.maximum(res["ber_layers"][snr_idx], 1e-6)
+    # Piso de BER visible: una capa con BER=0 debe seguir mostrando una barra.
+    floor = 1e-5
+    bers = np.maximum(res["ber_layers"][snr_idx], floor)
     x = np.arange(N)
     colors = [_MODCOLOR.get(m, "#7f8c8d") for m in mods]
     ax.bar(x, bers, color=colors, edgecolor="black", linewidth=0.6)
-    ax.set_yscale("log"); ax.set_ylim(1e-6, 1.0)
+    ax.set_yscale("log"); ax.set_ylim(floor / 5, 1.5)
     for xi, b, m in zip(x, bers, mods):
-        ax.text(xi, b * 1.4, _MODNAME.get(m, ""), ha="center", va="bottom",
+        ax.text(xi, b * 1.5, _MODNAME.get(m, ""), ha="center", va="bottom",
                 fontsize=9, fontweight="bold")
     ax.set_xticks(x)
     ax.set_xticklabels([f"Ant {i+1}\n(λ{i+1})" for i in range(N)], fontsize=8)

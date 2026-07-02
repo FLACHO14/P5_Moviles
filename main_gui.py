@@ -329,8 +329,13 @@ class OFDM_Simulator:
         canvas.get_tk_widget().pack(fill="both", expand=True)
         plt.close(fig)
 
-    def _embed_scroll(self, fig, tab):
-        """Incrusta una figura alta en un área con barra de desplazamiento."""
+    def _embed_scroll(self, fig, tab, aspect):
+        """Incrusta una figura alta con scroll vertical, ajustada al ancho.
+
+        La figura se redimensiona al ancho disponible de la ventana (manteniendo
+        la relación de aspecto pedida) para que ninguna gráfica quede cortada en
+        horizontal; el desplazamiento es solo vertical.
+        """
         outer = tk.Frame(tab)
         outer.pack(fill="both", expand=True)
         vbar = tk.Scrollbar(outer, orient="vertical")
@@ -340,17 +345,30 @@ class OFDM_Simulator:
         vbar.config(command=canvas.yview)
 
         inner = tk.Frame(canvas)
-        canvas.create_window((0, 0), window=inner, anchor="nw")
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
         mpl = FigureCanvasTkAgg(fig, master=inner)
-        mpl.draw()
         mpl.get_tk_widget().pack()
-        inner.update_idletasks()
-        canvas.config(scrollregion=canvas.bbox("all"))
+
+        dpi = fig.get_dpi()
+        state = {"w": 0}
+
+        def _fit(event):
+            w = event.width
+            if abs(w - state["w"]) < 20:      # evitar redibujar en cada píxel
+                return
+            state["w"] = w
+            win_in = max(6.0, w / dpi)
+            fig.set_size_inches(win_in, win_in * aspect, forward=True)
+            mpl.draw()
+            canvas.itemconfig(win_id, width=w)
+            inner.update_idletasks()
+            canvas.config(scrollregion=canvas.bbox("all"))
+
+        canvas.bind("<Configure>", _fit)
 
         def _wheel(event):
             canvas.yview_scroll(int(-event.delta / 120), "units")
         canvas.bind_all("<MouseWheel>", _wheel)
-        plt.close(fig)
 
     # ==============================================================
     # Simulación
@@ -1600,7 +1618,7 @@ class OFDM_Simulator:
             fig.add_subplot(gs[5, 4:6]), imgd["mcw"],
             "MCW adaptativo (SIC)",
             subtitle=f"PSNR {imgd['psnr_mcw']:.1f} dB\nMSE {imgd['mse_mcw']:.1f}\n{mods}")
-        self._embed_scroll(fig, self.tab13)
+        self._embed_scroll(fig, self.tab13, aspect=26.0 / 15.0)
 
 
 if __name__ == "__main__":
