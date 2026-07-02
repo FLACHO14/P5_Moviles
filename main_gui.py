@@ -27,6 +27,7 @@ import ofdm_params
 import ofdm_beamforming
 import ofdm_mimo_lab
 import LTE_TURBO
+import ofdm_mcw_sic
 
 BF_CORR_MAP = {"Baja (diversidad)": "low", "Alta (solo potencia)": "high"}
 
@@ -186,6 +187,17 @@ class OFDM_Simulator:
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
 
+        # --- MIMO MCW-SIC (botón propio, independiente) ---
+        ttk.Label(
+            ctrl_frame, text="MIMO MCW-SIC (pestaña 13):", font=("Helvetica", 9, "bold")
+        ).pack(padx=5, anchor="w")
+        tk.Button(
+            ctrl_frame, text="EJECUTAR MCW-SIC", command=self.run_mcw_sic,
+            bg="#6c3483", fg="white", font=("Helvetica", 9, "bold"),
+        ).pack(pady=(2, 4), fill="x", padx=5)
+
+        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
+
         # --- Lista de valores SNR ---
         ttk.Label(ctrl_frame, text="Valores SNR (dB):", font=("Helvetica", 9, "bold")).pack(
             padx=5, anchor="w"
@@ -258,6 +270,8 @@ class OFDM_Simulator:
         self.notebook.add(self.tab11, text="11. Laboratorio MIMO")
         self.tab12 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab12, text="12. Turbo LTE")
+        self.tab13 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab13, text="13. MIMO MCW-SIC")
 
     # helpers para layout compacto
     def _row(self, parent, label, var):
@@ -867,6 +881,34 @@ class OFDM_Simulator:
 
         except Exception as e:
             messagebox.showerror("Error Turbo LTE", str(e))
+            raise
+
+    def run_mcw_sic(self):
+        """Ejecuta el MIMO 2x2 Multi-Codeword adaptativo con receptor SIC.
+
+        Compara la transmisión multi-codeword con adaptación de enlace por
+        eigenvalores frente a la single-codeword de modulación fija, y muestra
+        el throughput, la mejora de la segunda capa con el SIC y las
+        constelaciones heterogéneas de las dos capas.
+        """
+        try:
+            snr_list = [0, 5, 10, 15, 20, 25]
+            self._status("MIMO MCW-SIC...\nMulti-Codeword adaptativo vs "
+                         "Single-Codeword fijo\nThroughput, BER por capa y SIC")
+            res = ofdm_mcw_sic.run_mcw_vs_scw(snr_list, n_frames=12, n_sc=300)
+            self._status("MIMO MCW-SIC: constelaciones heterogéneas...")
+            # SNR intermedia donde las dos capas usan modulaciones distintas,
+            # para evidenciar la naturaleza heterogénea del sistema MCW.
+            cd = ofdm_mcw_sic.constellation_data(10, n_sc=1500)
+            self.sim_data["mcw_data"] = {"res": res, "const": cd}
+            self._render_tab13(self.sim_data)
+            self.notebook.select(self.tab13)
+            self._status(
+                "MIMO MCW-SIC listo.\nMCW adaptativo (64/16/QPSK por eigenvalor)\n"
+                "Receptor SIC + comparación con SCW fijo"
+            )
+        except Exception as e:
+            messagebox.showerror("Error MCW-SIC", str(e))
             raise
 
     # ==============================================================
@@ -1569,6 +1611,49 @@ class OFDM_Simulator:
             )
 
         self._embed(fig, self.tab12)
+
+    # --- Tab 13: MIMO Multi-Codeword con receptor SIC ---
+
+    def _render_tab13(self, d):
+        self._clear_tab(self.tab13)
+        data = d.get("mcw_data")
+
+        if not data:
+            tk.Label(
+                self.tab13,
+                text="Pulse 'EJECUTAR MCW-SIC'.\nMIMO 2x2 Multi-Codeword: cada "
+                     "capa se modula de forma independiente según el eigenvalor "
+                     "del canal\n(64QAM / 16QAM / QPSK), con receptor SIC de "
+                     "cancelación sucesiva de interferencia,\ncomparado con "
+                     "Single-Codeword de modulación fija.",
+                font=("Consolas", 11), fg="#555", pady=40, justify="left",
+            ).pack(fill="both", expand=True)
+            return
+
+        res = data["res"]
+        cd = data["const"]
+        info = (
+            "  MIMO 2x2 Multi-Codeword (MCW)  |  Adaptación por eigenvalores "
+            "(64/16/QPSK)  |  Receptor SIC  |  Canal Rayleigh 2x2, CSI ideal  |  "
+            "Comparación con SCW fijo (16QAM)"
+        )
+        tk.Label(
+            self.tab13, text=info, font=("Consolas", 9, "bold"),
+            bg="#4a235a", fg="white", relief="groove", padx=8, pady=4,
+        ).pack(fill="x", padx=6, pady=(5, 0))
+
+        fig = plt.figure(figsize=(15, 9), constrained_layout=True)
+        gs = fig.add_gridspec(2, 2)
+        fig.suptitle(
+            "MIMO Multi-Codeword adaptativo con SIC frente a Single-Codeword fijo",
+            fontsize=13, fontweight="bold",
+        )
+        ofdm_mcw_sic.plot_throughput(fig.add_subplot(gs[0, 0]), res)
+        ofdm_mcw_sic.plot_ber_layers(fig.add_subplot(gs[0, 1]), res)
+        ofdm_mcw_sic.plot_constellations(
+            fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1]), cd
+        )
+        self._embed(fig, self.tab13)
 
 
 if __name__ == "__main__":
