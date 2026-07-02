@@ -204,12 +204,13 @@ def siso_maxlogmap(Lc_sys, Lc_par, La):
 
 def turbo_decode(Lc_sys, Lc_par1, Lc_par2,
                  Lc_tail1_sys, Lc_tail1_par, Lc_tail2_sys, Lc_tail2_par,
-                 interleaver, n_iter=6):
+                 interleaver, n_iter=6, return_llr=False):
     """Decodificador Turbo iterativo de LTE (Max-Log-MAP).
 
     Intercambia información extrínseca entre los dos decodificadores SISO a
     través del entrelazador durante n_iter iteraciones y devuelve los bits
-    estimados.
+    estimados. Con return_llr=True devuelve también el LLR total por bit, útil
+    para inspeccionar cómo la iteración afina la fiabilidad de las decisiones.
     """
     K = len(Lc_sys)
     deint = inverse_permutation(interleaver)
@@ -242,7 +243,10 @@ def turbo_decode(Lc_sys, Lc_par1, Lc_par2,
 
     # LLR total y decisión dura
     L_total = Lc_sys + Le1_info + Le2_info[deint]
-    return (L_total < 0).astype(np.uint8)
+    hard = (L_total < 0).astype(np.uint8)
+    if return_llr:
+        return hard, L_total
+    return hard
 
 
 # -------------------------------------------------------------------

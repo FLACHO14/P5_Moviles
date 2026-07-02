@@ -25,7 +25,6 @@ import ofdm_rx
 import ofdm_utils
 import ofdm_params
 import ofdm_beamforming
-import ofdm_mimo_lab
 import LTE_TURBO
 import ofdm_mcw_sic
 
@@ -74,8 +73,8 @@ class OFDM_Simulator:
         self.bf_nt_var = tk.StringVar(value="4")
         self.bf_corr_var = tk.StringVar(value="Baja (diversidad)")
 
-        # Laboratorio MIMO (botón propio, reutiliza la base)
-        self.lab_sir_var = tk.StringVar(value="3")
+        # MIMO MCW-SIC (número de antenas configurable de 2 a 8)
+        self.mcw_nt_var = tk.StringVar(value="2")
 
         # Codificación de canal Turbo LTE (botón propio, independiente)
         self.turbo_k_var = tk.StringVar(value="256")
@@ -158,15 +157,15 @@ class OFDM_Simulator:
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
 
-        # --- Laboratorio MIMO (botón propio, reutiliza la base) ---
+        # --- MIMO MCW-SIC (botón propio, número de antenas configurable) ---
         ttk.Label(
-            ctrl_frame, text="Laboratorio MIMO (pestaña 11):",
-            font=("Helvetica", 9, "bold"),
+            ctrl_frame, text="MIMO MCW-SIC (pestaña 11):", font=("Helvetica", 9, "bold")
         ).pack(padx=5, anchor="w")
-        self._row(ctrl_frame, "IRC SIR (dB):", self.lab_sir_var)
+        self._combo(ctrl_frame, "Antenas (NxN):", self.mcw_nt_var,
+                    ["2", "3", "4", "5", "6", "7", "8"])
         tk.Button(
-            ctrl_frame, text="EJECUTAR LAB MIMO", command=self.run_mimo_lab,
-            bg="#c0392b", fg="white", font=("Helvetica", 9, "bold"),
+            ctrl_frame, text="EJECUTAR MCW-SIC", command=self.run_mcw_sic,
+            bg="#6c3483", fg="white", font=("Helvetica", 9, "bold"),
         ).pack(pady=(2, 4), fill="x", padx=5)
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
@@ -183,17 +182,6 @@ class OFDM_Simulator:
         tk.Button(
             ctrl_frame, text="EJECUTAR TURBO LTE", command=self.run_turbo,
             bg="#117a65", fg="white", font=("Helvetica", 9, "bold"),
-        ).pack(pady=(2, 4), fill="x", padx=5)
-
-        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
-
-        # --- MIMO MCW-SIC (botón propio, independiente) ---
-        ttk.Label(
-            ctrl_frame, text="MIMO MCW-SIC (pestaña 13):", font=("Helvetica", 9, "bold")
-        ).pack(padx=5, anchor="w")
-        tk.Button(
-            ctrl_frame, text="EJECUTAR MCW-SIC", command=self.run_mcw_sic,
-            bg="#6c3483", fg="white", font=("Helvetica", 9, "bold"),
         ).pack(pady=(2, 4), fill="x", padx=5)
 
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill="x", padx=5, pady=4)
@@ -266,12 +254,10 @@ class OFDM_Simulator:
         self.notebook.add(self.tab9, text="9. Imagen SISO vs SFBC")
         self.tab10 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab10, text="10. Beamforming")
-        self.tab11 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab11, text="11. Laboratorio MIMO")
+        self.tab13 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab13, text="11. MIMO MCW-SIC")
         self.tab12 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab12, text="12. Turbo LTE")
-        self.tab13 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab13, text="13. MIMO MCW-SIC")
 
     # helpers para layout compacto
     def _row(self, parent, label, var):
@@ -341,6 +327,29 @@ class OFDM_Simulator:
         canvas = FigureCanvasTkAgg(fig, master=tab)
         canvas.draw()
         canvas.get_tk_widget().pack(fill="both", expand=True)
+        plt.close(fig)
+
+    def _embed_scroll(self, fig, tab):
+        """Incrusta una figura alta en un área con barra de desplazamiento."""
+        outer = tk.Frame(tab)
+        outer.pack(fill="both", expand=True)
+        vbar = tk.Scrollbar(outer, orient="vertical")
+        vbar.pack(side="right", fill="y")
+        canvas = tk.Canvas(outer, yscrollcommand=vbar.set, highlightthickness=0)
+        canvas.pack(side="left", fill="both", expand=True)
+        vbar.config(command=canvas.yview)
+
+        inner = tk.Frame(canvas)
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        mpl = FigureCanvasTkAgg(fig, master=inner)
+        mpl.draw()
+        mpl.get_tk_widget().pack()
+        inner.update_idletasks()
+        canvas.config(scrollregion=canvas.bbox("all"))
+
+        def _wheel(event):
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+        canvas.bind_all("<MouseWheel>", _wheel)
         plt.close(fig)
 
     # ==============================================================
@@ -679,7 +688,6 @@ class OFDM_Simulator:
                 "img_sfbc_cmp": img_sfbc_cmp,
                 "txdiv_gains": txdiv_gains,
                 "bf_data": bf_data,
-                "lab_data": None,
             }
             self.render_plots()
 
@@ -742,66 +750,6 @@ class OFDM_Simulator:
 
         except Exception as e:
             messagebox.showerror("Error Beamforming", str(e))
-            raise
-
-    def run_mimo_lab(self):
-        """Ejecuta el laboratorio MIMO reutilizando la simulación base.
-
-        Compara en una sola corrida SISO, SIMO-MRC, SIMO-IRC, MISO-SFBC,
-        Beamforming y Multiplexación Espacial, además de la imagen recuperada
-        a SNR baja, el tiempo de procesamiento y la distribución de PAPR. El
-        canal se configura con dos taps para una selectividad moderada.
-        """
-        if not self._bf_base:
-            messagebox.showinfo(
-                "Laboratorio MIMO",
-                "Primero ejecute la transmisión principal. El laboratorio "
-                "reutiliza esos datos como punto de partida.",
-            )
-            return
-
-        try:
-            b = self._bf_base
-            NR = max(2, int(self.nr_ant_var.get()))
-            NT = max(2, int(self.bf_nt_var.get()))
-            corr = BF_CORR_MAP.get(self.bf_corr_var.get(), "low")
-            sir = float(self.lab_sir_var.get())
-            taps_lab = 2  # canal selectivo de 2 taps para el laboratorio
-
-            self._status(
-                "Laboratorio MIMO...\n(SISO, SIMO-MRC, IRC, SFBC, "
-                f"Beamforming, Mux 2x2)\nNR={NR} NT={NT} corr={corr} SIR={sir} dB"
-            )
-            lab = ofdm_mimo_lab.run_mimo_lab_analysis(
-                b["bits_tx"], b["Nfft"], b["cp_len"], b["sc_map"], b["pilot_value"],
-                b["profile"], taps_lab, b["snr_list"], b["n_mc"], b["velocity"],
-                b["M"], NR=NR, NT=NT, correlation=corr, sir_db=sir,
-            )
-            self._status("Laboratorio MIMO: imágenes a 5 dB...")
-            lab_img = ofdm_mimo_lab.transmit_image_all_modes(
-                b["bits_tx"], b["img_arr"], b["Nfft"], b["cp_len"], b["sc_map"],
-                b["pilot_value"], b["profile"], taps_lab, 5, b["velocity"],
-                b["M"], NR=NR, NT=NT, correlation=corr, sir_db=sir,
-            )
-            self._status("Laboratorio MIMO: distribución de PAPR...")
-            lab_papr = ofdm_mimo_lab.papr_distribution_data(
-                b["Nfft"], b["cp_len"], b["sc_map"], b["pilot_value"], b["M"], NT=NT,
-            )
-            self.sim_data["lab_data"] = {
-                "lab": lab, "img": lab_img, "papr": lab_papr,
-                "NR": NR, "NT": NT, "correlation": corr, "sir": sir,
-            }
-            self._render_tab11(self.sim_data)
-            self.notebook.select(self.tab11)
-            self._status(
-                f"Laboratorio MIMO listo.\nNR={NR}  NT={NT}  corr={corr}  "
-                f"SIR={sir} dB\nImagen 5 dB: SISO PSNR="
-                f"{lab_img['SISO']['psnr']:.1f} | MRC PSNR="
-                f"{lab_img['SIMO-MRC']['psnr']:.1f}"
-            )
-
-        except Exception as e:
-            messagebox.showerror("Error Laboratorio MIMO", str(e))
             raise
 
     def run_turbo(self):
@@ -883,29 +831,68 @@ class OFDM_Simulator:
             messagebox.showerror("Error Turbo LTE", str(e))
             raise
 
+    def _mcw_image(self, max_side=56):
+        """Imagen pequeña en gris para la comparación MCW vs SCW.
+
+        Usa la imagen cargada si existe; si no, genera un patrón sintético.
+        Se reduce de tamaño para acotar el tiempo de la demostración.
+        """
+        if self.img_path.get():
+            try:
+                im = Image.open(self.img_path.get()).convert("L")
+                im.thumbnail((max_side, max_side))
+                return np.array(im, dtype=np.uint8)
+            except Exception:
+                pass
+        # Patrón sintético: gradiente con un círculo, si no hay imagen cargada
+        yy, xx = np.mgrid[0:max_side, 0:max_side]
+        grad = (xx / max_side * 255).astype(np.uint8)
+        r = np.sqrt((xx - max_side / 2) ** 2 + (yy - max_side / 2) ** 2)
+        grad[r < max_side / 3] = 230
+        return grad.astype(np.uint8)
+
     def run_mcw_sic(self):
-        """Ejecuta el MIMO 2x2 Multi-Codeword adaptativo con receptor SIC.
+        """Ejecuta el MIMO N x N Multi-Codeword adaptativo con receptor SIC.
 
         Compara la transmisión multi-codeword con adaptación de enlace por
         eigenvalores frente a la single-codeword de modulación fija, y muestra
-        el throughput, la mejora de la segunda capa con el SIC y las
-        constelaciones heterogéneas de las dos capas.
+        el throughput, la mejora de la última capa con el SIC y las
+        constelaciones heterogéneas. El número de antenas es configurable de 2
+        a 8, como admite LTE Advanced.
         """
         try:
+            N = max(2, min(8, int(self.mcw_nt_var.get())))
             snr_list = [0, 5, 10, 15, 20, 25]
-            self._status("MIMO MCW-SIC...\nMulti-Codeword adaptativo vs "
+            # Con más antenas se reduce el número de subportadoras por bloque
+            # para mantener acotado el tiempo de simulación.
+            n_sc = 300 if N <= 4 else 180
+            self._status(f"MIMO MCW-SIC {N}x{N}...\nMulti-Codeword adaptativo vs "
                          "Single-Codeword fijo\nThroughput, BER por capa y SIC")
-            res = ofdm_mcw_sic.run_mcw_vs_scw(snr_list, n_frames=12, n_sc=300)
+            res = ofdm_mcw_sic.run_mcw_vs_scw(snr_list, N=N, n_frames=12, n_sc=n_sc)
             self._status("MIMO MCW-SIC: constelaciones heterogéneas...")
-            # SNR intermedia donde las dos capas usan modulaciones distintas,
+            # SNR intermedia donde las capas usan modulaciones distintas,
             # para evidenciar la naturaleza heterogénea del sistema MCW.
-            cd = ofdm_mcw_sic.constellation_data(10, n_sc=1500)
-            self.sim_data["mcw_data"] = {"res": res, "const": cd}
+            cd = ofdm_mcw_sic.constellation_data(10, N=N, n_sc=1500)
+
+            self._status("MIMO MCW-SIC: eigenvalores, PAPR y LLR...")
+            eig = ofdm_mcw_sic.eigenvalue_data(N=N, n_sc=220)
+            papr = ofdm_mcw_sic.papr_ccdf_data()
+            llr = ofdm_mcw_sic.llr_hist_data(K=512, snr_db=1.5)
+
+            self._status("MIMO MCW-SIC: imágenes comparativas SCW vs MCW...")
+            img_small = self._mcw_image()
+            imgd = ofdm_mcw_sic.transmit_image_mcw_scw(img_small, N=N, snr_db=15.0)
+            timg = ofdm_mcw_sic.image_time_data(img_small, N=N)
+
+            self.sim_data["mcw_data"] = {
+                "res": res, "const": cd, "N": N, "eig": eig, "papr": papr,
+                "llr": llr, "img": imgd, "timg": timg,
+            }
             self._render_tab13(self.sim_data)
             self.notebook.select(self.tab13)
             self._status(
-                "MIMO MCW-SIC listo.\nMCW adaptativo (64/16/QPSK por eigenvalor)\n"
-                "Receptor SIC + comparación con SCW fijo"
+                f"MIMO MCW-SIC listo.\nMIMO {N}x{N}, MCW adaptativo "
+                "(64/16/QPSK por eigenvalor)\nReceptor SIC, monitoreo y comparación de imagen"
             )
         except Exception as e:
             messagebox.showerror("Error MCW-SIC", str(e))
@@ -929,7 +916,6 @@ class OFDM_Simulator:
         self._render_tab8(d)
         self._render_tab9(d)
         self._render_tab10(d)
-        self._render_tab11(d)
 
     # --- Tab 1: Imagen TX/RX y constelaciones (modulación seleccionada) ---
 
@@ -1468,72 +1454,6 @@ class OFDM_Simulator:
         figB.subplots_adjust(left=0.03, right=0.98, top=0.80, bottom=0.16, wspace=0.12)
         self._embed(figB, self.tab10)
 
-    # --- Tab 11: Laboratorio MIMO ---
-
-    def _render_tab11(self, d):
-        self._clear_tab(self.tab11)
-        data = d.get("lab_data")
-
-        if not data:
-            tk.Label(
-                self.tab11,
-                text="Ajuste IRC SIR, NR, NT y correlación, y pulse "
-                     "'EJECUTAR LAB MIMO'.\nCompara SISO, SIMO-MRC, SIMO-IRC, "
-                     "MISO-SFBC, Beamforming y Multiplexación Espacial\n"
-                     "reutilizando la simulación principal como base.",
-                font=("Consolas", 11), fg="#555", pady=40, justify="left",
-            ).pack(fill="both", expand=True)
-            return
-
-        lab = data["lab"]
-        img = data["img"]
-        mod = d["mod_selected"]
-        info = (
-            f"  Laboratorio MIMO  |  Canal Rayleigh 2 taps  |  "
-            f"NR={data['NR']}  NT={data['NT']}  |  Correlación: {data['correlation']}  |  "
-            f"IRC SIR={data['sir']} dB  |  Modulación: {mod}"
-        )
-        tk.Label(
-            self.tab11, text=info, font=("Consolas", 9, "bold"),
-            bg="#7b241c", fg="white", relief="groove", padx=8, pady=4,
-        ).pack(fill="x", padx=6, pady=(5, 0))
-
-        # Figura A: BER comparativo + tiempo de procesamiento + PAPR
-        figA, axA = plt.subplots(1, 3, figsize=(18, 5))
-        figA.suptitle(
-            "Comparativa Multi-Antena: BER, Tiempo de Procesamiento y PAPR",
-            fontsize=12, fontweight="bold",
-        )
-        ofdm_mimo_lab.plot_lab_ber(axA[0], lab, mod)
-        ofdm_mimo_lab.plot_processing_time(axA[1], lab)
-        ofdm_mimo_lab.plot_papr_distribution(axA[2], data["papr"])
-        figA.subplots_adjust(left=0.05, right=0.98, top=0.86, bottom=0.12, wspace=0.24)
-        self._embed(figA, self.tab11)
-
-        # Figura B: imagen recuperada por modo a 5 dB
-        figB = plt.figure(figsize=(18, 3.6))
-        figB.suptitle(
-            f"Imagen recuperada a {img['snr_db']} dB por cada modo "
-            f"(la diversidad espacial preserva mejor la estructura)",
-            fontsize=11, fontweight="bold",
-        )
-        modes = ["SISO", "SIMO-MRC", "MISO-SFBC", "Beamforming", "MIMO"]
-        gs = figB.add_gridspec(1, 1 + len(modes))
-        ofdm_utils.plot_image_panel(
-            figB.add_subplot(gs[0, 0]), img["img_orig"], "Original (Referencia)"
-        )
-        for i, mode in enumerate(modes):
-            m = img.get(mode)
-            if m is None:
-                continue
-            label = "MIMO (Mux-Espacial)" if mode == "MIMO" else mode
-            ofdm_utils.plot_image_panel(
-                figB.add_subplot(gs[0, 1 + i]), m["img"], label,
-                subtitle=f"PSNR = {m['psnr']:.2f} dB\nBER = {m['ber']:.2e}",
-            )
-        figB.subplots_adjust(left=0.02, right=0.99, top=0.80, bottom=0.16, wspace=0.12)
-        self._embed(figB, self.tab11)
-
     # --- Tab 12: Codificación de canal Turbo LTE ---
 
     def _render_tab12(self, d):
@@ -1621,9 +1541,10 @@ class OFDM_Simulator:
         if not data:
             tk.Label(
                 self.tab13,
-                text="Pulse 'EJECUTAR MCW-SIC'.\nMIMO 2x2 Multi-Codeword: cada "
-                     "capa se modula de forma independiente según el eigenvalor "
-                     "del canal\n(64QAM / 16QAM / QPSK), con receptor SIC de "
+                text="Elija el número de antenas (2 a 8) y pulse "
+                     "'EJECUTAR MCW-SIC'.\nMIMO N x N Multi-Codeword: cada capa "
+                     "se modula de forma independiente según el eigenvalor del "
+                     "canal\n(64QAM / 16QAM / QPSK), con receptor SIC de "
                      "cancelación sucesiva de interferencia,\ncomparado con "
                      "Single-Codeword de modulación fija.",
                 font=("Consolas", 11), fg="#555", pady=40, justify="left",
@@ -1632,28 +1553,54 @@ class OFDM_Simulator:
 
         res = data["res"]
         cd = data["const"]
+        N = data.get("N", res.get("N", 2))
+        eig = data["eig"]; papr = data["papr"]; llr = data["llr"]
+        imgd = data["img"]; timg = data["timg"]
         info = (
-            "  MIMO 2x2 Multi-Codeword (MCW)  |  Adaptación por eigenvalores "
-            "(64/16/QPSK)  |  Receptor SIC  |  Canal Rayleigh 2x2, CSI ideal  |  "
-            "Comparación con SCW fijo (16QAM)"
+            f"  MIMO {N}x{N} Multi-Codeword (MCW)  |  Adaptación por eigenvalores "
+            f"(64/16/QPSK)  |  Receptor SIC  |  Canal Rayleigh {N}x{N}, CSI ideal  |  "
+            "Comparación con SCW fijo (16QAM)  |  (desplácese para ver todo)"
         )
         tk.Label(
             self.tab13, text=info, font=("Consolas", 9, "bold"),
             bg="#4a235a", fg="white", relief="groove", padx=8, pady=4,
         ).pack(fill="x", padx=6, pady=(5, 0))
 
-        fig = plt.figure(figsize=(15, 9), constrained_layout=True)
-        gs = fig.add_gridspec(2, 2)
+        fig = plt.figure(figsize=(15, 26), constrained_layout=True)
+        gs = fig.add_gridspec(6, 6)
         fig.suptitle(
-            "MIMO Multi-Codeword adaptativo con SIC frente a Single-Codeword fijo",
-            fontsize=13, fontweight="bold",
+            "MIMO Multi-Codeword adaptativo con SIC — comportamiento por antena y monitoreo",
+            fontsize=14, fontweight="bold",
         )
-        ofdm_mcw_sic.plot_throughput(fig.add_subplot(gs[0, 0]), res)
-        ofdm_mcw_sic.plot_ber_layers(fig.add_subplot(gs[0, 1]), res)
+        # Fila 1: rendimiento MCW vs SCW
+        ofdm_mcw_sic.plot_throughput(fig.add_subplot(gs[0, 0:3]), res)
+        ofdm_mcw_sic.plot_ber_layers(fig.add_subplot(gs[0, 3:6]), res)
+        # Fila 2: comportamiento por antena y estado del canal
+        ofdm_mcw_sic.plot_per_antenna(fig.add_subplot(gs[1, 0:3]), res)
+        ofdm_mcw_sic.plot_eigenvalues(fig.add_subplot(gs[1, 3:6]), eig)
+        # Fila 3: monitoreo computacional
+        ofdm_mcw_sic.plot_sim_time(fig.add_subplot(gs[2, 0:3]), res)
+        ofdm_mcw_sic.plot_image_time(fig.add_subplot(gs[2, 3:6]), timg)
+        # Fila 4: potencia y confianza
+        ofdm_mcw_sic.plot_papr_ccdf(fig.add_subplot(gs[3, 0:3]), papr)
+        ofdm_mcw_sic.plot_llr_hist(fig.add_subplot(gs[3, 3:6]), llr)
+        # Fila 5: constelaciones independientes por capa
         ofdm_mcw_sic.plot_constellations(
-            fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1]), cd
+            fig.add_subplot(gs[4, 0:3]), fig.add_subplot(gs[4, 3:6]), cd
         )
-        self._embed(fig, self.tab13)
+        # Fila 6: imágenes comparativas
+        ofdm_utils.plot_image_panel(
+            fig.add_subplot(gs[5, 0:2]), imgd["orig"], "Imagen original")
+        ofdm_utils.plot_image_panel(
+            fig.add_subplot(gs[5, 2:4]), imgd["scw"],
+            "SCW (16QAM fijo, MMSE)",
+            subtitle=f"PSNR {imgd['psnr_scw']:.1f} dB\nMSE {imgd['mse_scw']:.1f}")
+        mods = " + ".join(ofdm_mcw_sic._MODNAME.get(m, "") for m in imgd["M_layers"])
+        ofdm_utils.plot_image_panel(
+            fig.add_subplot(gs[5, 4:6]), imgd["mcw"],
+            "MCW adaptativo (SIC)",
+            subtitle=f"PSNR {imgd['psnr_mcw']:.1f} dB\nMSE {imgd['mse_mcw']:.1f}\n{mods}")
+        self._embed_scroll(fig, self.tab13)
 
 
 if __name__ == "__main__":

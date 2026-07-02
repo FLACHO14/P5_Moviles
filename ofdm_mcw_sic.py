@@ -22,10 +22,16 @@
 # El canal es una matriz de Rayleigh N x N independiente por cada subportadora
 # OFDM, con conocimiento perfecto del canal en el transmisor y el receptor.
 
+import time
+
 import numpy as np
+import matplotlib.pyplot as plt
 
 import ofdm_tx
 import ofdm_rx
+import ofdm_utils
+import ofdm_params
+import LTE_TURBO
 
 
 # ===================================================================
@@ -182,11 +188,17 @@ def run_mcw_vs_scw(snr_list, N=2, n_frames=12, n_sc=300, T1=15.0, T2=8.0, M_scw=
         "thr_mcw": [], "thr_scw": [],
         "ber_first": [], "ber_last_sic": [], "ber_last_mmse": [],
         "mod_first": [], "mod_last": [],
+        "sim_time_ms": [],           # tiempo de simulación por nivel de SNR
+        "ber_layers": [],            # BER de cada capa (índice de autovalor) por SNR
+        "mod_layers": [],            # modulación de cada capa por SNR
     }
     for snr_db in snr_list:
+        t0 = time.perf_counter()
         thr_mcw = thr_scw = 0.0
         bf = bls = blm = 0.0
         mf_acc = []; ml_acc = []
+        ber_lay = np.zeros(N)               # BER acumulada por capa (con SIC)
+        mod_lay = [[] for _ in range(N)]    # modulaciones por capa a lo largo de las tramas
         for _ in range(n_frames):
             H = gen_channel(n_sc, N)
             blk = _run_block_mcw(H, snr_db, T1, T2)
@@ -194,10 +206,12 @@ def run_mcw_vs_scw(snr_list, N=2, n_frames=12, n_sc=300, T1=15.0, T2=8.0, M_scw=
             order = blk["order"]
             l_first, l_last = order[0], order[-1]
 
-            # Throughput: suma de bits correctamente recibidos sobre todas las capas
+            # Throughput y BER de cada capa espacial (capa i = i-ésimo autovalor)
             for layer in range(N):
                 ber = _ber_layer(blk["bits_tx"][layer], blk["shat_sic"][layer], M_layers[layer])
                 thr_mcw += np.log2(M_layers[layer]) * (1 - ber)
+                ber_lay[layer] += ber
+                mod_lay[layer].append(M_layers[layer])
 
             # BER de la primera capa detectada y de la última con y sin SIC
             bf += _ber_layer(blk["bits_tx"][l_first], blk["shat_sic"][l_first], M_layers[l_first])
@@ -216,6 +230,9 @@ def run_mcw_vs_scw(snr_list, N=2, n_frames=12, n_sc=300, T1=15.0, T2=8.0, M_scw=
         res["ber_last_mmse"].append(blm / n_frames)
         res["mod_first"].append(int(np.median(mf_acc)))
         res["mod_last"].append(int(np.median(ml_acc)))
+        res["sim_time_ms"].append((time.perf_counter() - t0) * 1e3)
+        res["ber_layers"].append((ber_lay / n_frames).tolist())
+        res["mod_layers"].append([int(np.median(m)) for m in mod_lay])
     return res
 
 
@@ -236,6 +253,182 @@ def constellation_data(snr_db, N=2, n_sc=1500, T1=15.0, T2=8.0):
         i_lo = (i_hi + 1) % N
     return {"layer1": s[:, i_hi], "layer2": s[:, i_lo],
             "M1": M_layers[i_hi], "M2": M_layers[i_lo], "snr_db": snr_db, "N": N}
+
+
+# ===================================================================
+# Datos para las visualizaciones avanzadas de monitoreo
+# ===================================================================
+
+def eigenvalue_data(N=2, n_sc=220):
+    """Magnitud de los eigenvalores de H^H H por subportadora.
+
+    Permite identificar visualmente los desvanecimientos profundos: cuando el
+    eigenvalor más pequeño se hunde, ese modo espacial casi no puede transportar
+    información y la multiplexación espacial pierde efectividad en esa
+    subportadora.
+    """
+    H = gen_channel(n_sc, N)
+    ev = channel_eigenvalues(H)          # (n_sc, N) descendente
+    return {"ev": ev, "N": N}
+
+
+def papr_ccdf_data(n_symbols=300, bw_mhz=10.0, M=16, pilot_spacing=6):
+    """CCDF del PAPR para OFDM frente a SC-FDM (precodificación DFT).
+
+    La precodificación DFT del SC-FDM concentra la energía y reduce los picos de
+    potencia instantánea, por lo que su curva CCDF queda desplazada hacia PAPR
+    más bajos que la de OFDM.
+    """
+    Nfft, cp_len, N_used = ofdm_utils.get_nfft_cp(bw_mhz, "normal")
+    sc_map = ofdm_utils.build_subcarrier_map(Nfft, N_used, pilot_spacing)
+    pilot_value = ofdm_params.PILOT_AMPLITUDE
+    n_data = sc_map["n_data"]
+    M_dft = ofdm_tx.get_best_dft_size(n_data, Nfft)
+
+    k = int(np.log2(M))
+    sym_ofdm = ofdm_tx.qam_mod(np.random.randint(0, 2, n_symbols * n_data * k), M)
+    _, papr_ofdm, _ = ofdm_tx.ofdm_tx_block(sym_ofdm, Nfft, cp_len, sc_map, pilot_value)
+
+    sym_sc = ofdm_tx.qam_mod(np.random.randint(0, 2, n_symbols * M_dft * k), M)
+    _, papr_sc, _ = ofdm_tx.scfdma_tx_block(sym_sc, Nfft, cp_len, sc_map, pilot_value, M_dft)
+
+    papr_ofdm = np.asarray(papr_ofdm); papr_sc = np.asarray(papr_sc)
+    gamma = np.linspace(0, max(papr_ofdm.max(), papr_sc.max()) + 0.5, 120)
+    ccdf_ofdm = np.mean(papr_ofdm[:, None] > gamma[None, :], axis=0)
+    ccdf_sc = np.mean(papr_sc[:, None] > gamma[None, :], axis=0)
+    return {"gamma": gamma, "ccdf_ofdm": ccdf_ofdm, "ccdf_sc": ccdf_sc}
+
+
+def llr_hist_data(K=512, snr_db=1.5, n_iter=6):
+    """Distribución de las métricas suaves LLR antes y después de Turbo.
+
+    A la salida del demodulador (canal) los LLR forman dos campanas solapadas:
+    hay decisiones poco fiables cerca de cero. Tras las iteraciones del
+    decodificador Turbo el LLR total se vuelve marcadamente bimodal y de gran
+    magnitud, señal de que las decisiones se han 'limpiado'.
+    """
+    bits = np.random.randint(0, 2, K).astype(np.uint8)
+    enc = LTE_TURBO.turbo_encode(bits)
+    R = LTE_TURBO.code_rate(K)
+    ebno = 10 ** (snr_db / 10.0)
+    sigma2 = 1.0 / (2.0 * R * ebno)
+    Lc = 2.0 / sigma2
+    sigma = np.sqrt(sigma2)
+
+    def tx(b):
+        x = LTE_TURBO._bpsk(b)
+        return x + sigma * np.random.randn(len(x))
+
+    rs = tx(enc["sys"]); rp1 = tx(enc["par1"]); rp2 = tx(enc["par2"])
+    rt1s = tx(enc["tail1_sys"]); rt1p = tx(enc["tail1_par"])
+    rt2s = tx(enc["tail2_sys"]); rt2p = tx(enc["tail2_par"])
+
+    _, L_total = LTE_TURBO.turbo_decode(
+        Lc * rs, Lc * rp1, Lc * rp2,
+        Lc * rt1s, Lc * rt1p, Lc * rt2s, Lc * rt2p,
+        enc["interleaver"], n_iter, return_llr=True,
+    )
+    return {"llr_channel": Lc * rs, "llr_turbo": np.asarray(L_total), "snr_db": snr_db}
+
+
+def _mimo_image_chain(bits, N, snr_db, M_layers):
+    """Transmite un flujo de bits por N capas MCW con receptor SIC.
+
+    Cada capa lleva su propia modulación (M_layers). Los bits se reparten en
+    bloques contiguos, una capa detrás de otra, y se recuperan en el mismo orden
+    tras la cancelación sucesiva de interferencia.
+    """
+    k_lay = [int(np.log2(m)) for m in M_layers]
+    bits_per_sc = sum(k_lay)
+    n_sc = int(np.ceil(len(bits) / bits_per_sc))
+    cap = n_sc * bits_per_sc
+    b = np.zeros(cap, dtype=np.uint8); b[:len(bits)] = bits
+
+    H = gen_channel(n_sc, N)
+    snr_lin = 10 ** (snr_db / 10.0); sigma2 = 1.0 / snr_lin
+
+    X = np.zeros((n_sc, N), dtype=complex)
+    off = 0
+    for layer in range(N):
+        nb = n_sc * k_lay[layer]
+        X[:, layer] = ofdm_tx.qam_mod(b[off:off + nb], M_layers[layer])[:n_sc]
+        off += nb
+
+    noise = (np.random.randn(n_sc, N) + 1j * np.random.randn(n_sc, N)) * np.sqrt(sigma2 / 2)
+    r = np.einsum('nij,nj->ni', H, X) + noise
+    shat, _ = sic_receiver(r, H, M_layers, sigma2)
+
+    rx = []
+    for layer in range(N):
+        rx.append(_demod_layer(shat[layer], M_layers[layer]))
+    return np.concatenate(rx)[:len(bits)]
+
+
+def _mimo_image_chain_scw(bits, N, snr_db, M=16):
+    """Transmite un flujo de bits por N capas con modulación fija (SCW, MMSE)."""
+    k = int(np.log2(M))
+    n_sc = int(np.ceil(len(bits) / (N * k)))
+    cap = n_sc * N * k
+    b = np.zeros(cap, dtype=np.uint8); b[:len(bits)] = bits
+
+    H = gen_channel(n_sc, N)
+    snr_lin = 10 ** (snr_db / 10.0); sigma2 = 1.0 / snr_lin
+    syms = ofdm_tx.qam_mod(b, M)[:n_sc * N]
+    X = syms.reshape(n_sc, N)
+    noise = (np.random.randn(n_sc, N) + 1j * np.random.randn(n_sc, N)) * np.sqrt(sigma2 / 2)
+    r = np.einsum('nij,nj->ni', H, X) + noise
+    shat = mmse_joint(r, H, sigma2)
+    return _demod_layer(shat.reshape(-1), M)[:len(bits)]
+
+
+def transmit_image_mcw_scw(img_arr, N=2, snr_db=15.0, T1=15.0, T2=8.0, M_scw=16):
+    """Transmite la misma imagen por MCW adaptativo y por SCW fijo.
+
+    Devuelve las imágenes recuperadas por cada esquema para compararlas
+    visualmente junto con sus métricas de calidad (MSE y PSNR).
+    """
+    img_arr = np.asarray(img_arr, dtype=np.uint8)
+    bits = np.unpackbits(img_arr.flatten())
+    n_bits = len(bits)
+
+    # Modulación por capa según un canal de sondeo (adaptación de enlace)
+    ev_mean = np.mean(channel_eigenvalues(gen_channel(400, N)), axis=0)
+    snr_lin = 10 ** (snr_db / 10.0)
+    eff_snr_db = 10 * np.log10(snr_lin * ev_mean + 1e-12)
+    M_layers = [assign_modulation(eff_snr_db[i], T1, T2) for i in range(N)]
+
+    rx_mcw = _mimo_image_chain(bits, N, snr_db, M_layers)
+    rx_scw = _mimo_image_chain_scw(bits, N, snr_db, M_scw)
+
+    img_mcw = ofdm_utils._bits_to_image(rx_mcw, n_bits, n_bits, img_arr.shape)
+    img_scw = ofdm_utils._bits_to_image(rx_scw, n_bits, n_bits, img_arr.shape)
+    mse_mcw, psnr_mcw = ofdm_utils._img_metrics(img_arr, img_mcw)
+    mse_scw, psnr_scw = ofdm_utils._img_metrics(img_arr, img_scw)
+    return {
+        "orig": img_arr, "mcw": img_mcw, "scw": img_scw,
+        "psnr_mcw": psnr_mcw, "mse_mcw": mse_mcw,
+        "psnr_scw": psnr_scw, "mse_scw": mse_scw,
+        "M_layers": M_layers, "N": N, "snr_db": snr_db,
+    }
+
+
+def image_time_data(img_arr, N=2, M=16, n_data=600, t_sym_us=71.4):
+    """Tiempo de transmisión al aire de una imagen: SISO frente a MIMO N x N.
+
+    La multiplexación espacial envía N flujos simultáneos sobre las mismas
+    subportadoras, así que transmite la imagen en aproximadamente 1/N del tiempo
+    (menos símbolos OFDM al aire). Con N=2 la velocidad efectiva se duplica. Se
+    modela el número de símbolos OFDM necesarios con una duración de símbolo de
+    LTE (CP normal, t_sym_us) sobre n_data subportadoras de datos.
+    """
+    n_bits = int(np.asarray(img_arr).size) * 8
+    k = int(np.log2(M))
+    n_ofdm_siso = int(np.ceil(n_bits / (k * n_data)))
+    n_ofdm_mimo = int(np.ceil(n_bits / (k * n_data * N)))
+    t_siso = n_ofdm_siso * t_sym_us / 1e3      # ms
+    t_mimo = n_ofdm_mimo * t_sym_us / 1e3
+    speedup = t_siso / t_mimo if t_mimo > 0 else float(N)
+    return {"t_siso_ms": t_siso, "t_mimo_ms": t_mimo, "speedup": speedup, "N": N}
 
 
 # ===================================================================
@@ -287,3 +480,114 @@ def plot_constellations(ax1, ax2, cd):
                      fontsize=10)
         ax.set_xlabel("En fase"); ax.set_ylabel("Cuadratura")
         ax.grid(True, alpha=0.3); ax.set_aspect("equal", adjustable="box")
+
+
+_MODCOLOR = {4: "#2980b9", 16: "#e67e22", 64: "#c0392b"}
+
+
+def _pick_snr_index(res):
+    """Índice de SNR donde las capas usan modulaciones distintas (o la mayor)."""
+    for i in range(len(res["snr"]) - 1, -1, -1):
+        if len(set(res["mod_layers"][i])) > 1:
+            return i
+    return len(res["snr"]) - 1
+
+
+def plot_per_antenna(ax, res, snr_idx=None):
+    """Modulación y BER de cada antena: qué envía y cómo se comporta cada flujo."""
+    if snr_idx is None:
+        snr_idx = _pick_snr_index(res)
+    N = res["N"]
+    mods = res["mod_layers"][snr_idx]
+    bers = np.maximum(res["ber_layers"][snr_idx], 1e-6)
+    x = np.arange(N)
+    colors = [_MODCOLOR.get(m, "#7f8c8d") for m in mods]
+    ax.bar(x, bers, color=colors, edgecolor="black", linewidth=0.6)
+    ax.set_yscale("log"); ax.set_ylim(1e-6, 1.0)
+    for xi, b, m in zip(x, bers, mods):
+        ax.text(xi, b * 1.4, _MODNAME.get(m, ""), ha="center", va="bottom",
+                fontsize=9, fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Ant {i+1}\n(λ{i+1})" for i in range(N)], fontsize=8)
+    ax.set_title(f"Modulación y BER por antena — SNR {res['snr'][snr_idx]} dB",
+                 fontsize=10)
+    ax.set_ylabel("BER de la capa (con SIC)")
+    handles = [plt.Rectangle((0, 0), 1, 1, color=_MODCOLOR[m]) for m in (4, 16, 64)]
+    ax.legend(handles, ["QPSK", "16QAM", "64QAM"], fontsize=8, title="Modulación")
+    ax.grid(True, which="both", axis="y", alpha=0.3)
+
+
+def plot_eigenvalues(ax, ed):
+    """Eigenvalores por subportadora: identifica los desvanecimientos profundos."""
+    ev = ed["ev"]; N = ed["N"]
+    n_sc = ev.shape[0]
+    x = np.arange(n_sc)
+    ev_db = 10 * np.log10(ev + 1e-12)
+    cmap = plt.cm.viridis(np.linspace(0, 0.85, N))
+    for i in range(N):
+        ax.plot(x, ev_db[:, i], color=cmap[i], linewidth=1.1,
+                label=f"λ{i+1}" + (" (más fuerte)" if i == 0 else
+                                    " (más débil)" if i == N - 1 else ""))
+    # Resaltar los desvanecimientos profundos del modo más débil
+    weak = ev_db[:, -1]
+    thr = np.percentile(weak, 12)
+    deep = weak < thr
+    ax.scatter(x[deep], weak[deep], s=14, color="#c0392b", zorder=5,
+               label="Desvanecimiento profundo")
+    ax.set_title(f"Eigenvalores del canal MIMO {N}x{N} por subportadora", fontsize=10)
+    ax.set_xlabel("Subportadora"); ax.set_ylabel("Magnitud del eigenvalor (dB)")
+    ax.legend(fontsize=7, ncol=2); ax.grid(True, alpha=0.3)
+
+
+def plot_sim_time(ax, res):
+    """Tiempo total de simulación por nivel de SNR (carga computacional)."""
+    snr = np.array(res["snr"])
+    t = np.array(res["sim_time_ms"])
+    ax.bar(snr, t, width=3.0, color="#16a085", edgecolor="black", linewidth=0.6)
+    ax.set_title("Tiempo de simulación por nivel de SNR", fontsize=10)
+    ax.set_xlabel("SNR (dB)"); ax.set_ylabel("Tiempo (ms)")
+    ax.grid(True, axis="y", alpha=0.3)
+
+
+def plot_image_time(ax, td):
+    """Tiempo de transmisión de imagen: SISO frente a MIMO N x N."""
+    N = td["N"]
+    labels = ["SISO (1 capa)", f"MIMO {N}x{N} ({N} capas)"]
+    vals = [td["t_siso_ms"], td["t_mimo_ms"]]
+    colors = ["#2980b9", "#c0392b"]
+    bars = ax.bar(labels, vals, color=colors, edgecolor="black", linewidth=0.6)
+    for bar, v in zip(bars, vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, v, f"{v:.1f} ms",
+                ha="center", va="bottom", fontsize=9)
+    ax.set_title(f"Tiempo de transmisión de imagen — MIMO ×{td['speedup']:.1f} más rápido",
+                 fontsize=10)
+    ax.set_ylabel("Tiempo (ms)")
+    ax.grid(True, axis="y", alpha=0.3)
+
+
+def plot_papr_ccdf(ax, pd):
+    """CCDF del PAPR: la precodificación DFT del SC-FDM reduce los picos."""
+    g = pd["gamma"]
+    ax.semilogy(g, np.maximum(pd["ccdf_ofdm"], 1e-4), color="#c0392b", linewidth=2,
+                label="OFDM")
+    ax.semilogy(g, np.maximum(pd["ccdf_sc"], 1e-4), color="#2980b9", linewidth=2,
+                label="SC-FDM (precod. DFT)")
+    ax.set_ylim(1e-3, 1.0)
+    ax.set_title("Distribución de potencia (CCDF del PAPR)", fontsize=10)
+    ax.set_xlabel("PAPR γ (dB)"); ax.set_ylabel("Probabilidad  P(PAPR > γ)")
+    ax.legend(fontsize=9); ax.grid(True, which="both", alpha=0.3)
+
+
+def plot_llr_hist(ax, ld):
+    """Histograma de LLR: el decodificador Turbo 'limpia' las decisiones."""
+    ch = ld["llr_channel"]; tb = ld["llr_turbo"]
+    lim = np.percentile(np.abs(np.concatenate([ch, tb])), 99)
+    bins = np.linspace(-lim, lim, 60)
+    ax.hist(ch, bins=bins, density=True, alpha=0.55, color="#7f8c8d",
+            label="Salida del demodulador (canal)")
+    ax.hist(tb, bins=bins, density=True, alpha=0.55, color="#c0392b",
+            label="Después de Turbo (LLR total)")
+    ax.axvline(0, color="black", lw=0.8, alpha=0.6)
+    ax.set_title(f"Métrica de confianza LLR — SNR {ld['snr_db']} dB", fontsize=10)
+    ax.set_xlabel("LLR"); ax.set_ylabel("Densidad de probabilidad")
+    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
