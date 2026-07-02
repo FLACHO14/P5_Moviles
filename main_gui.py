@@ -892,10 +892,8 @@ class OFDM_Simulator:
             # para evidenciar la naturaleza heterogénea del sistema MCW.
             cd = ofdm_mcw_sic.constellation_data(10, N=N, n_sc=1500)
 
-            self._status("MIMO MCW-SIC: eigenvalores, PAPR y LLR...")
+            self._status("MIMO MCW-SIC: eigenvalores del canal...")
             eig = ofdm_mcw_sic.eigenvalue_data(N=N, n_sc=220)
-            papr = ofdm_mcw_sic.papr_ccdf_data()
-            llr = ofdm_mcw_sic.llr_hist_data(K=512, snr_db=1.5)
 
             self._status("MIMO MCW-SIC: imágenes comparativas SCW vs MCW...")
             img_small = self._mcw_image()
@@ -903,8 +901,8 @@ class OFDM_Simulator:
             timg = ofdm_mcw_sic.image_time_data(img_small, N=N)
 
             self.sim_data["mcw_data"] = {
-                "res": res, "const": cd, "N": N, "eig": eig, "papr": papr,
-                "llr": llr, "img": imgd, "timg": timg,
+                "res": res, "const": cd, "N": N, "eig": eig,
+                "img": imgd, "timg": timg,
             }
             self._render_tab13(self.sim_data)
             self.notebook.select(self.tab13)
@@ -1572,7 +1570,7 @@ class OFDM_Simulator:
         res = data["res"]
         cd = data["const"]
         N = data.get("N", res.get("N", 2))
-        eig = data["eig"]; papr = data["papr"]; llr = data["llr"]
+        eig = data["eig"]
         imgd = data["img"]; timg = data["timg"]
         info = (
             f"  MIMO {N}x{N} Multi-Codeword (MCW)  |  Adaptación por eigenvalores "
@@ -1584,8 +1582,8 @@ class OFDM_Simulator:
             bg="#4a235a", fg="white", relief="groove", padx=8, pady=4,
         ).pack(fill="x", padx=6, pady=(5, 0))
 
-        fig = plt.figure(figsize=(15, 26), constrained_layout=True)
-        gs = fig.add_gridspec(6, 6)
+        fig = plt.figure(figsize=(15, 22), constrained_layout=True)
+        gs = fig.add_gridspec(5, 6)
         fig.suptitle(
             "MIMO Multi-Codeword adaptativo con SIC — comportamiento por antena y monitoreo",
             fontsize=14, fontweight="bold",
@@ -1599,26 +1597,23 @@ class OFDM_Simulator:
         # Fila 3: monitoreo computacional
         ofdm_mcw_sic.plot_sim_time(fig.add_subplot(gs[2, 0:3]), res)
         ofdm_mcw_sic.plot_image_time(fig.add_subplot(gs[2, 3:6]), timg)
-        # Fila 4: potencia y confianza
-        ofdm_mcw_sic.plot_papr_ccdf(fig.add_subplot(gs[3, 0:3]), papr)
-        ofdm_mcw_sic.plot_llr_hist(fig.add_subplot(gs[3, 3:6]), llr)
-        # Fila 5: constelaciones independientes por capa
+        # Fila 4: constelaciones independientes por capa
         ofdm_mcw_sic.plot_constellations(
-            fig.add_subplot(gs[4, 0:3]), fig.add_subplot(gs[4, 3:6]), cd
+            fig.add_subplot(gs[3, 0:3]), fig.add_subplot(gs[3, 3:6]), cd
         )
-        # Fila 6: imágenes comparativas
+        # Fila 5: imágenes comparativas
         ofdm_utils.plot_image_panel(
-            fig.add_subplot(gs[5, 0:2]), imgd["orig"], "Imagen original")
+            fig.add_subplot(gs[4, 0:2]), imgd["orig"], "Imagen original")
         ofdm_utils.plot_image_panel(
-            fig.add_subplot(gs[5, 2:4]), imgd["scw"],
+            fig.add_subplot(gs[4, 2:4]), imgd["scw"],
             "SCW (16QAM fijo, MMSE)",
             subtitle=f"PSNR {imgd['psnr_scw']:.1f} dB\nMSE {imgd['mse_scw']:.1f}")
         mods = " + ".join(ofdm_mcw_sic._MODNAME.get(m, "") for m in imgd["M_layers"])
         ofdm_utils.plot_image_panel(
-            fig.add_subplot(gs[5, 4:6]), imgd["mcw"],
+            fig.add_subplot(gs[4, 4:6]), imgd["mcw"],
             "MCW adaptativo (SIC)",
             subtitle=f"PSNR {imgd['psnr_mcw']:.1f} dB\nMSE {imgd['mse_mcw']:.1f}\n{mods}")
-        self._embed_scroll(fig, self.tab13, aspect=26.0 / 15.0)
+        self._embed_scroll(fig, self.tab13, aspect=22.0 / 15.0)
 
 
 if __name__ == "__main__":
